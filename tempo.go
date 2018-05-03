@@ -13,23 +13,25 @@ type Config struct {
 
 func NewDispatcher(c *Config) *Dispatcher {
 	return &Dispatcher{
-		doWork:        make(chan bool),
-		stop:          make(chan bool),
-		Q:             make(chan item),
-		MaxBatchItems: c.MaxBatchItems,
-		BatchCh:       make(chan []item, 1),
-		Interval:      c.Interval,
+		doWork:          make(chan bool),
+		stop:            make(chan bool),
+		Q:               make(chan item),
+		MaxBatchItems:   c.MaxBatchItems,
+		BatchCh:         make(chan []item),
+		Interval:        c.Interval,
+		DispatchedCount: 0,
 	}
 }
 
 type Dispatcher struct {
-	doWork        chan bool
-	stop          chan bool
-	timer         *time.Timer
-	Q             chan item
-	BatchCh       chan []item
-	Interval      time.Duration
-	MaxBatchItems int
+	doWork          chan bool
+	stop            chan bool
+	timer           *time.Timer
+	Q               chan item
+	BatchCh         chan []item
+	Interval        time.Duration
+	MaxBatchItems   int
+	DispatchedCount int
 }
 
 func (d *Dispatcher) tick() {
@@ -43,6 +45,7 @@ func (d *Dispatcher) dispatch(batch chan item) {
 	for b := range batch {
 		items = append(items, b)
 	}
+	d.DispatchedCount += len(items)
 	d.BatchCh <- items
 }
 
@@ -56,9 +59,12 @@ func (d *Dispatcher) Start() {
 			if len(batch) < cap(batch) {
 				batch <- m
 			} else {
+				//  we have a ghost item we'll call Casper.
 				d.timer.Stop()
 				go func() {
 					d.doWork <- true
+					// send Casper to the next batch.
+					d.Q <- m
 				}()
 			}
 		case doWork := <-d.doWork:
