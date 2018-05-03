@@ -17,7 +17,7 @@ func NewDispatcher(c *Config) *Dispatcher {
 		stop:          make(chan bool),
 		Q:             make(chan item),
 		MaxBatchItems: c.MaxBatchItems,
-		BatchCh:       make(chan item, c.MaxBatchItems),
+		BatchCh:       make(chan []item, 1),
 		Interval:      c.Interval,
 	}
 }
@@ -27,7 +27,7 @@ type Dispatcher struct {
 	stop          chan bool
 	timer         *time.Timer
 	Q             chan item
-	BatchCh       chan item
+	BatchCh       chan []item
 	Interval      time.Duration
 	MaxBatchItems int
 }
@@ -39,9 +39,11 @@ func (d *Dispatcher) tick() {
 }
 
 func (d *Dispatcher) dispatch(batch chan item) {
+	var items []item
 	for b := range batch {
-		d.BatchCh <- b
+		items = append(items, b)
 	}
+	d.BatchCh <- items
 }
 
 func (d *Dispatcher) Start() {

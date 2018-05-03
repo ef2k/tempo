@@ -47,9 +47,11 @@ func TestLog(t *testing.T) {
 	go func() {
 		for {
 			select {
-			case b := <-d.BatchCh:
-				m := b.(msg)
-				log.Println(m.S)
+			case batch := <-d.BatchCh:
+				for _, b := range batch {
+					m := b.(msg)
+					log.Print(m.S)
+				}
 			}
 		}
 	}()

@@ -42,8 +42,12 @@ go func() {
 // consume the batch
 for {
   select {
-    case b := <-d.BatchCh:
-    // do whatever.
+    case batch := <-d.BatchCh:
+      for _, b := range batch {
+        s := b.(string) 
+        // do whatever.
+        log.Print(s)
+      }
   }
 }
 ```
