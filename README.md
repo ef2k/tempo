@@ -1,24 +1,26 @@
 `tempo`
 =======
 
-Batch queued items by time intervals.
+A dispatched batch queue that processes items at time intervals or as soon as a batching limit is met.
 
-## Features
+## Features 
 
-- **Always available item collection** <br> Enqueue items as they arrive, even during simultaneous processing.
+- **Non-blocking enqueue** <br> Queue up incoming items without blocking processing.
 
-- **Process on a time interval** <br> Items are batched according to the time interval they arrived in.
+- **Processing by periodic time intervals** <br> Items are batched for processing by the interval of time they arrive in.
 
-- **Plain old Go Channels**<br> Implementation is thread safe and backed by inherent channel behavior.
+- **Processing as soon as a batch limit is met**<br> If the batch limit is reached before the time interval expires, items are processed immediately. 
+
+- **Plain old Go channels** <br> Implementation leverages the normal syncing behavior of channels. It's free of mutexes and other bookkeeping techniques.
 
 ## Install
 ```sh
-go get -u github.com/ef2k/tempo
+$ dep ensure -add github.com/ef2k/tempo
 ```
 
 ## Example
 
-Collect a stream of messages and process them as a batch every 10 seconds.
+Collect a constant stream of messages and process them as every 10 seconds or as soon as we reach a batching limit.
 
 ```go
 package main
@@ -31,35 +33,40 @@ type msg string
 
 func main() {
 
-  q := tempo.Q{
+  // init a dispatcher
+  d := tempo.NewDispatcher(&tempo.Config{
     Interval: time.Duration(10) * time.Second,
-    MaxItems: 1000,
-  }
-
-  // a handler called at the end of each interval
-  q.Dispatch(func(ch tempo.C) {
-    for item := range ch {
-      m := item.(msg)
-      log.Print(m)
-    }
+    MaxBatchItems: 100,
   })
 
-  // produce some items
+  // start it up in its own goroutine.
+  go d.Start()
+
+
+  // produce lots of messages...
+
   go func() {
     for i := 0; i < 50; i++ {
-      m := msg{fmt.Sprintf("producer2/ message #%d", i)}
-      q.Enqueue(m)
+      m := msg{fmt.Sprintf("producer1/ message #%d", i)}
+      d.Q <- m
       time.Sleep(time.Duration(100) * time.Millisecond)
     }
   }()
   go func() {
     for i := 0; i < 50; i++ {
       m := msg{fmt.Sprintf("producer2/ message #%d", i)}
-      q.Enqueue(m)
+      d.Q <- m
       time.Sleep(time.Duration(100) * time.Millisecond)
     }
   }()
 
+  // get the batch and print them out.
+  for {
+    select {
+    case b := <-d.BatchCh:
+      log.Println(b)
+    }
+  }
 }
 ```
 
