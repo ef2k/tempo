@@ -13,9 +13,9 @@ type Config struct {
 
 func NewDispatcher(c *Config) *Dispatcher {
 	return &Dispatcher{
-		Q:      make(chan item),
-		doWork: make(chan bool),
-
+		doWork:        make(chan bool),
+		stop:          make(chan bool),
+		Q:             make(chan item),
 		MaxBatchItems: c.MaxBatchItems,
 		BatchCh:       make(chan item, c.MaxBatchItems),
 		Interval:      c.Interval,
@@ -23,12 +23,13 @@ func NewDispatcher(c *Config) *Dispatcher {
 }
 
 type Dispatcher struct {
-	Q             chan item
 	doWork        chan bool
+	stop          chan bool
+	timer         *time.Timer
+	Q             chan item
 	BatchCh       chan item
 	Interval      time.Duration
 	MaxBatchItems int
-	timer         *time.Timer
 }
 
 func (d *Dispatcher) tick() {
@@ -70,7 +71,13 @@ func (d *Dispatcher) Start() {
 			d.dispatch(batch)
 			batch = make(chan item, d.MaxBatchItems)
 			d.tick()
+		case <-d.stop:
+			d.timer.Stop()
+			d.dispatch(batch)
+			return
 		}
-
 	}
+}
+func (d *Dispatcher) Stop() {
+	d.stop <- true
 }

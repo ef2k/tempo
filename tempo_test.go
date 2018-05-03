@@ -8,11 +8,12 @@ import (
 )
 
 type msg struct {
-	s string
+	S string
 }
 
 func TestLog(t *testing.T) {
-	done := make(chan bool)
+
+	log.SetFlags(log.Lmicroseconds)
 
 	// init a dispatcher
 	d := NewDispatcher(&Config{
@@ -20,11 +21,13 @@ func TestLog(t *testing.T) {
 		MaxBatchItems: 50,
 	})
 
+	// stop everything when we're done.
+	defer d.Stop()
+
 	// start it up in its own goroutine.
 	go d.Start()
 
 	// produce lots of messages...
-
 	go func() {
 		for i := 0; i < 50; i++ {
 			m := msg{fmt.Sprintf("producer1/ message #%d", i)}
@@ -41,50 +44,17 @@ func TestLog(t *testing.T) {
 	}()
 
 	// get the batch and print them out.
-	for {
-		select {
-		case b := <-d.BatchCh:
-			log.Println(b)
+	go func() {
+		for {
+			select {
+			case b := <-d.BatchCh:
+				m := b.(msg)
+				log.Println(m.S)
+			}
 		}
-	}
+	}()
 
-	// 	d := NewDispatcher(&Config{
-	// 		Interval:      time.Duration(5000) * time.Millisecond,
-	// 		MaxBatchItems: 10,
-	// 	})
-	// 	go d.Start()
-
-	// 	// Make lots of concurrent messages.
-	// 	go func() {
-	// 		for i := 0; i < 100; i++ {
-	// 			m := fmt.Sprintf("prod1 #%d", i)
-	// 			d.Q <- m
-	// 			time.Sleep(time.Duration(100) * time.Millisecond)
-	// 		}
-	// 	}()
-
-	// 	for {
-	// 		select {
-	// 		case b := <-d.BatchCh:
-	// 			log.Println(b)
-	// 		}
-	// 	}
-
+	done := make(chan bool)
 	<-done
+
 }
-
-// go func() {
-// 	for i := 0; i < 50; i++ {
-// 		m := fmt.Sprintf("prod2 #%d", i)
-// 		d.Q <- m
-// 		time.Sleep(time.Duration(100) * time.Millisecond)
-// 	}
-// }()
-
-// time.AfterFunc(time.Duration(30)*time.Second, func() {
-// 	for i := 0; i < 50; i++ {
-// 		m := fmt.Sprintf("prod3 #%d", i)
-// 		d.Q <- m
-// 		time.Sleep(time.Duration(100) * time.Millisecond)
-// 	}
-// })
