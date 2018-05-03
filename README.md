@@ -1,7 +1,7 @@
 `tempo`
 =======
 
-A dispatched batch queue that processes items at time intervals or as soon as a batching limit is met.
+A dispatched batch queue to process items at time intervals or when a batching limit is met.
 
 ## Features 
 
@@ -18,54 +18,32 @@ A dispatched batch queue that processes items at time intervals or as soon as a 
 $ dep ensure -add github.com/ef2k/tempo
 ```
 
-## Example
+## Sample Usage 
 
-Collect a constant stream of messages and process them as every 10 seconds or as soon as we reach a batching limit.
+Dispatch a batch at 10 second intervals or as soon as a batching limit of 50 items is met.
 
 ```go
-package main
+// initialize
+d := tempo.NewDispatcher(&tempo.Config{
+  Interval:      time.Duration(10) * time.Second,
+  MaxBatchItems: 50,
+})
+defer d.Stop()
+go d.Start()
 
-import (
-  "github.com/ef2k/tempo"
-)
+// produce some messages
+go func() {
+  for i:= 0; i < 100; i++ {
+    m := fmt.Sprintf("message #%d", i)
+    d.Q<-m
+  }
+}()
 
-type msg string
-
-func main() {
-
-  // init a dispatcher
-  d := tempo.NewDispatcher(&tempo.Config{
-    Interval: time.Duration(10) * time.Second,
-    MaxBatchItems: 100,
-  })
-
-  // start it up in its own goroutine.
-  go d.Start()
-
-
-  // produce lots of messages...
-
-  go func() {
-    for i := 0; i < 50; i++ {
-      m := msg{fmt.Sprintf("producer1/ message #%d", i)}
-      d.Q <- m
-      time.Sleep(time.Duration(100) * time.Millisecond)
-    }
-  }()
-  go func() {
-    for i := 0; i < 50; i++ {
-      m := msg{fmt.Sprintf("producer2/ message #%d", i)}
-      d.Q <- m
-      time.Sleep(time.Duration(100) * time.Millisecond)
-    }
-  }()
-
-  // get the batch and print them out.
-  for {
-    select {
+// consume the batch
+for {
+  select {
     case b := <-d.BatchCh:
-      log.Println(b)
-    }
+    // do whatever.
   }
 }
 ```
