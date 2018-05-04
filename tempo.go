@@ -16,9 +16,9 @@ func NewDispatcher(c *Config) *Dispatcher {
 		doWork:          make(chan bool),
 		stop:            make(chan bool),
 		Q:               make(chan item),
-		MaxBatchItems:   c.MaxBatchItems,
-		BatchCh:         make(chan []item),
+		Batch:           make(chan []item),
 		Interval:        c.Interval,
+		MaxBatchItems:   c.MaxBatchItems,
 		DispatchedCount: 0,
 	}
 }
@@ -28,7 +28,7 @@ type Dispatcher struct {
 	stop            chan bool
 	timer           *time.Timer
 	Q               chan item
-	BatchCh         chan []item
+	Batch           chan []item
 	Interval        time.Duration
 	MaxBatchItems   int
 	DispatchedCount int
@@ -46,7 +46,7 @@ func (d *Dispatcher) dispatch(batch chan item) {
 		items = append(items, b)
 	}
 	d.DispatchedCount += len(items)
-	d.BatchCh <- items
+	d.Batch <- items
 }
 
 func (d *Dispatcher) Start() {
@@ -59,11 +59,12 @@ func (d *Dispatcher) Start() {
 			if len(batch) < cap(batch) {
 				batch <- m
 			} else {
-				//  we have a ghost item we'll call Casper.
+				// NOTE at this point, there's no space in the
+				// batch and we have an item pending enqueue.
 				d.timer.Stop()
 				go func() {
 					d.doWork <- true
-					// send Casper to the next batch.
+					// enqueue into the next batch.
 					d.Q <- m
 				}()
 			}
@@ -82,6 +83,7 @@ func (d *Dispatcher) Start() {
 		case <-d.stop:
 			d.timer.Stop()
 			d.dispatch(batch)
+			d.DispatchedCount = 0
 			return
 		}
 	}
