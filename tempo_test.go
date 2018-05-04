@@ -2,61 +2,73 @@ package tempo
 
 import (
 	"fmt"
-	"log"
 	"testing"
 	"time"
 )
 
-type msg struct {
-	S string
+type event struct {
+	ts   time.Time
+	data string
 }
 
-func TestLog(t *testing.T) {
+func printf(s string, a ...interface{}) {
+	if testing.Verbose() {
+		fmt.Printf(s, a...)
+	}
+}
 
-	log.SetFlags(log.Lmicroseconds)
+func produce(d *Dispatcher, numProducers, numItems int) {
+	count := 0
+	for i := 0; i < numProducers; i++ {
+		for j := 0; j < numItems; j++ {
+			count++
+			d.Q <- &event{
+				ts:   time.Now(),
+				data: fmt.Sprintf("\tProducer #%d, Item #%d", i, j),
+			}
+		}
+	}
+}
 
-	// init a dispatcher
+func TestTempo(t *testing.T) {
 	d := NewDispatcher(&Config{
 		Interval:      time.Duration(10) * time.Second,
 		MaxBatchItems: 50,
 	})
 
-	// stop everything when we're done.
-	defer d.Stop()
-
-	// start it up in its own goroutine.
 	go d.Start()
 
-	// produce lots of messages...
-	go func() {
-		for i := 0; i < 50; i++ {
-			m := msg{fmt.Sprintf("producer1/ message #%d", i)}
-			d.Q <- m
-			time.Sleep(time.Duration(100) * time.Millisecond)
-		}
-	}()
-	go func() {
-		for i := 0; i < 50; i++ {
-			m := msg{fmt.Sprintf("producer2/ message #%d", i)}
-			d.Q <- m
-			time.Sleep(time.Duration(100) * time.Millisecond)
-		}
-	}()
+	t.Run("should not drop items when exceeding the batch limit", func(t *testing.T) {
+		printf("=== TEST The amount of items dispatched should equal the number of items received.\n")
+		numItems := 100
+		numProducers := 100
+		totalItems := numItems * numProducers
 
-	// get the batch and print them out.
-	go func() {
+		printf("=== INFO Queuing %d items with %d producers.\n", totalItems, numProducers)
+		go produce(d, numProducers, numItems)
+
+		breakout := make(chan bool)
+		time.AfterFunc(time.Duration(20)*time.Second, func() {
+			breakout <- true
+		})
+
+		printf("=== INFO Receiving dispatched batches:\n")
+		itemCount := 0
+	L:
 		for {
 			select {
-			case batch := <-d.BatchCh:
-				for _, b := range batch {
-					m := b.(msg)
-					log.Print(m.S)
-				}
+			case batch := <-d.Batch:
+				batchLen := len(batch)
+				printf("%d\t", batchLen)
+				itemCount += batchLen
+			case <-breakout:
+				d.Stop()
+				break L
 			}
 		}
-	}()
-
-	done := make(chan bool)
-	<-done
-
+		printf("\n=== INFO Received %d items.\n", itemCount)
+		if totalItems != d.DispatchedCount && totalItems != itemCount {
+			t.Errorf("Total number of queued items didn't equal the dispatched amount.")
+		}
+	})
 }
