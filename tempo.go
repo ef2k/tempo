@@ -35,6 +35,10 @@ type Dispatcher struct {
 }
 
 func (d *Dispatcher) tick() {
+	if d.timer != nil {
+		d.timer.Reset(d.Interval)
+		return
+	}
 	d.timer = time.AfterFunc(d.Interval, func() {
 		d.doWork <- true
 	})
@@ -89,5 +93,6 @@ func (d *Dispatcher) Start() {
 	}
 }
 func (d *Dispatcher) Stop() {
+	d.timer.Stop()
 	d.stop <- true
 }
