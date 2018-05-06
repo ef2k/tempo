@@ -1,7 +1,9 @@
-`tempo`
+`tempo` 
 =======
 
 A dispatched batch queue to process items at time intervals or when a batching limit is met.
+
+[![Go Report Card](https://goreportcard.com/badge/github.com/ef2k/tempo)](https://goreportcard.com/report/github.com/ef2k/tempo)
 
 ## Features
 
