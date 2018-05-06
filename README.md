@@ -1,25 +1,23 @@
-`tempo`
+`tempo` [![Go Report Card](https://goreportcard.com/badge/github.com/ef2k/tempo)](https://goreportcard.com/report/github.com/ef2k/tempo) [![Build Status](https://travis-ci.org/ef2k/tempo.svg?branch=master)](https://travis-ci.org/ef2k/tempo) [![GoDoc Reference](https://img.shields.io/badge/godoc-reference-blue.svg)](https://godoc.org/github.com/ef2k/tempo)
 =======
 A dispatched batch queue to process items at time intervals or when a batching limit is met.
 
 ## Features
 - **Non-blocking enqueue** <br> Queue up incoming items without blocking processing.
 
-- **Processing by periodic time intervals** <br> Items are batched for processing by the interval of time they arrive in.
+- **Dispatching by periodic time intervals** <br> Set a time interval and get batched items after time expires.
 
-- **Processing as soon as a batch limit is met**<br> If the batch limit is reached before the time interval expires, items are processed immediately.
+- **Dispatching as soon as a batch limit is met**<br> If a batch is filled before the time interval is up, dispatching is handled immediately.
 
-- **Plain old Go channels** <br> Implementation leverages the normal syncing behavior of channels; free of mutexes and other bookkeeping techniques.
+- **Plain old Go channels** <br> Implementation relies heavily on channels and is free of mutexes and other bookkeeping techniques.
 
 ## Install
-[![Go Report Card](https://goreportcard.com/badge/github.com/ef2k/tempo)](https://goreportcard.com/report/github.com/ef2k/tempo)
-[![Build Status](https://travis-ci.org/ef2k/tempo.svg?branch=master)](https://travis-ci.org/ef2k/tempo)
 ```sh
 $ dep ensure -add github.com/ef2k/tempo
 ```
 
 ## Documentation
-[![GoDoc Reference](https://img.shields.io/badge/godoc-reference-blue.svg)](https://godoc.org/github.com/ef2k/tempo)
+https://godoc.org/github.com/ef2k/tempo
 
 ## Sample Usage
 
