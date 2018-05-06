@@ -2,6 +2,8 @@
 =======
 A dispatched batch queue to process items at time intervals or when a batching limit is met.
 
+![3s demo](./examples/basic-3s-interval/tempo-3s.gif)
+
 ## Features
 - **Non-blocking enqueue** <br> Queue up incoming items without blocking processing.
 
