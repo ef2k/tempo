@@ -91,7 +91,6 @@ func (d *Dispatcher) Start() {
 			d.tick()
 		case <-d.stop:
 			d.timer.Stop()
-			d.dispatch(batch)
 			d.DispatchedCount = 0
 			return
 		}
