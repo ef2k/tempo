@@ -18,9 +18,13 @@ A dispatched batch queue to process items at time intervals or when a batching l
 $ dep ensure -add github.com/ef2k/tempo
 ```
 
+## Documentation
+[![GoDoc Reference](https://img.shields.io/badge/godoc-reference-blue.svg)](https://godoc.org/github.com/ef2k/tempo)
+
 ## Sample Usage
 
 Dispatch a batch at 10 second intervals or as soon as a batching limit of 50 items is met.
+See `examples/` for working code.
 
 ```go
 // initialize
