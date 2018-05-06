@@ -6,11 +6,13 @@ import (
 
 type item interface{}
 
+// Config configure time interval and set a batch limit.
 type Config struct {
 	Interval      time.Duration
 	MaxBatchItems int
 }
 
+// NewDispatcher returns an initialized instance of Dispatcher.
 func NewDispatcher(c *Config) *Dispatcher {
 	return &Dispatcher{
 		doWork:          make(chan bool),
@@ -23,6 +25,8 @@ func NewDispatcher(c *Config) *Dispatcher {
 	}
 }
 
+// Dispatcher coordinates dispatching of queue items by time intervals
+// or immediately after the batching limit is met.
 type Dispatcher struct {
 	doWork          chan bool
 	stop            chan bool
@@ -53,6 +57,7 @@ func (d *Dispatcher) dispatch(batch chan item) {
 	d.Batch <- items
 }
 
+// Start begins item dispatching.
 func (d *Dispatcher) Start() {
 	d.tick()
 	batch := make(chan item, d.MaxBatchItems)
@@ -92,6 +97,8 @@ func (d *Dispatcher) Start() {
 		}
 	}
 }
+
+// Stop stops the internal dispatch scheduler.
 func (d *Dispatcher) Stop() {
 	d.timer.Stop()
 	d.stop <- true
