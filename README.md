@@ -3,22 +3,22 @@
 
 A dispatched batch queue to process items at time intervals or when a batching limit is met.
 
-## Features 
+## Features
 
 - **Non-blocking enqueue** <br> Queue up incoming items without blocking processing.
 
 - **Processing by periodic time intervals** <br> Items are batched for processing by the interval of time they arrive in.
 
-- **Processing as soon as a batch limit is met**<br> If the batch limit is reached before the time interval expires, items are processed immediately. 
+- **Processing as soon as a batch limit is met**<br> If the batch limit is reached before the time interval expires, items are processed immediately.
 
-- **Plain old Go channels** <br> Implementation leverages the normal syncing behavior of channels. It's free of mutexes and other bookkeeping techniques.
+- **Plain old Go channels** <br> Implementation leverages the normal syncing behavior of channels; free of mutexes and other bookkeeping techniques.
 
 ## Install
 ```sh
 $ dep ensure -add github.com/ef2k/tempo
 ```
 
-## Sample Usage 
+## Sample Usage
 
 Dispatch a batch at 10 second intervals or as soon as a batching limit of 50 items is met.
 
@@ -42,9 +42,9 @@ go func() {
 // consume the batch
 for {
   select {
-    case batch := <-d.BatchCh:
+    case batch := <-d.Batch:
       for _, b := range batch {
-        s := b.(string) 
+        s := b.(string)
         // do whatever.
         log.Print(s)
       }
