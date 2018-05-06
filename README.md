@@ -2,8 +2,6 @@
 =======
 A dispatched batch queue to process items at time intervals or when a batching limit is met.
 
-![3s demo](./examples/basic-3s-interval/tempo-3s.gif)
-
 ## Features
 - **Non-blocking enqueue** <br> Queue up incoming items without blocking processing.
 
@@ -12,6 +10,8 @@ A dispatched batch queue to process items at time intervals or when a batching l
 - **Dispatching as soon as a batch limit is met**<br> If a batch is filled before the time interval is up, dispatching is handled immediately.
 
 - **Plain old Go channels** <br> Implementation relies heavily on channels and is free of mutexes and other bookkeeping techniques.
+
+![3s demo](./examples/basic-3s-interval/tempo-3s.gif)
 
 ## Install
 ```sh
