@@ -2,14 +2,10 @@ package tempo
 
 import (
 	"fmt"
+	"sync"
 	"testing"
 	"time"
 )
-
-type event struct {
-	ts   time.Time
-	data string
-}
 
 func printf(s string, a ...interface{}) {
 	if testing.Verbose() {
@@ -17,58 +13,94 @@ func printf(s string, a ...interface{}) {
 	}
 }
 
-func produce(d *Dispatcher, numProducers, numItems int) {
-	count := 0
-	for i := 0; i < numProducers; i++ {
-		for j := 0; j < numItems; j++ {
-			count++
-			d.Q <- &event{
-				ts:   time.Now(),
-				data: fmt.Sprintf("\tProducer #%d, Item #%d", i, j),
-			}
+func produce(q chan item, numItems, numGoroutines int, out chan []string) {
+	printf("=== Producing %d items.\n", numItems*numGoroutines)
+	done := make(chan bool, 1)
+	msgs := make(chan string)
+	var wg sync.WaitGroup
+	go func() {
+		for i := 0; i < numGoroutines; i++ {
+			wg.Add(1)
+			go func(routineIdx int) {
+				for j := 0; j < numItems; j++ {
+					m := fmt.Sprintf("producer#%d, item#%d", routineIdx, j)
+					q <- m
+					msgs <- m
+				}
+				wg.Done()
+			}(i)
+		}
+		wg.Wait()
+		done <- true
+	}()
+	var coll []string
+L:
+	for {
+		select {
+		case m := <-msgs:
+			coll = append(coll, m)
+		case <-done:
+			break L
 		}
 	}
+	out <- coll
 }
 
-func TestTempo(t *testing.T) {
+// Test cases:
+//
+// - Exceeding the batch limit, should trigger an immediate dispatch.
+// - No items should be dropped in the dispatch-receive process.
+// - When a receiver blocks, the rest of the items should be delivered.
+func TestDispatchOrder(t *testing.T) {
 	d := NewDispatcher(&Config{
-		Interval:      time.Duration(10) * time.Second,
-		MaxBatchItems: 50,
+		Interval:      time.Duration(1) * time.Second,
+		MaxBatchItems: 500,
 	})
-
+	defer d.Stop()
 	go d.Start()
 
-	t.Run("should not drop items when exceeding the batch limit", func(t *testing.T) {
-		printf("=== TEST The amount of items dispatched should equal the number of items received.\n")
-		numItems := 100
-		numProducers := 100
-		totalItems := numItems * numProducers
+	var (
+		numItems      = 10
+		numGoroutines = 100
+	)
 
-		printf("=== INFO Queuing %d items with %d producers.\n", totalItems, numProducers)
-		go produce(d, numProducers, numItems)
+	produced := make(chan []string, 1)
+	go produce(d.Q, numItems, numGoroutines, produced)
 
-		breakout := make(chan bool)
-		time.AfterFunc(time.Duration(20)*time.Second, func() {
-			breakout <- true
-		})
-
-		printf("=== INFO Receiving dispatched batches:\n")
-		itemCount := 0
-	L:
-		for {
-			select {
-			case batch := <-d.Batch:
-				batchLen := len(batch)
-				printf("%d\t", batchLen)
-				itemCount += batchLen
-			case <-breakout:
-				d.Stop()
-				break L
+	var dispatched []string
+	breakout := make(chan bool)
+	time.AfterFunc(time.Duration(3)*time.Second, func() {
+		breakout <- true
+	})
+L:
+	for {
+		select {
+		case batch := <-d.Batch:
+			for _, b := range batch {
+				m := b.(string)
+				dispatched = append(dispatched, m)
 			}
+		case <-breakout:
+			break L
 		}
-		printf("\n=== INFO Received %d items.\n", itemCount)
-		if totalItems != d.DispatchedCount && totalItems != itemCount {
-			t.Errorf("Total number of queued items didn't equal the dispatched amount.")
+	}
+	msgs := <-produced
+
+	t.Run("no lost items", func(t *testing.T) {
+		if len(msgs) != len(dispatched) {
+			t.Error("dispatched messages are missing")
+		}
+	})
+
+	t.Run("confirm dispatched items", func(t *testing.T) {
+		msgExists := make(map[string]bool)
+		for i := 0; i < len(msgs); i++ {
+			msgExists[msgs[i]] = false
+		}
+		for i := 0; i < len(dispatched); i++ {
+			if _, ok := msgExists[dispatched[i]]; !ok {
+				t.Errorf("item was not dispatched: %s", dispatched[i])
+			}
 		}
 	})
 }
