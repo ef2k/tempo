@@ -13,9 +13,7 @@ type event struct {
 	data string
 }
 
-func generateEvents(d *tempo.Dispatcher) {
-	sets := 100
-	items := 200
+func generateEvents(d *tempo.Dispatcher, sets, items int) {
 
 	log.Printf("x Should produce %d items.", sets*items)
 	count := 0
@@ -41,16 +39,23 @@ func main() {
 
 	// It's important to run this in a goroutine. Otherwise, you'll fill up the
 	// channels before getting to read from them, causing a deadlock.
-	go generateEvents(d)
+	sets := 100
+	items := 200
+	go generateEvents(d, sets, items)
 
 	for {
 		select {
-		case batch := <-d.BatchCh:
+		case batch := <-d.Batch:
 			log.Printf("+ Got a batch of %d items.", len(batch))
 			log.Printf("+ Dispatched so far: %d", d.DispatchedCount)
+			if d.DispatchedCount == sets*items {
+				return
+			}
+
+			// // Uncomment to print out items.
 			// for _, b := range batch {
 			// 	evt := b.(*event)
-			// 	// fmt.Printf("\t[event]: %s\n", evt.data)
+			// 	fmt.Printf("\t[event]: %s\n", evt.data)
 			// }
 		}
 	}
