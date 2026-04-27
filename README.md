@@ -1,5 +1,8 @@
-`tempo` [![Go Report Card](https://goreportcard.com/badge/github.com/ef2k/tempo)](https://goreportcard.com/report/github.com/ef2k/tempo) [![Build Status](https://travis-ci.org/ef2k/tempo.svg?branch=master)](https://travis-ci.org/ef2k/tempo) [![GoDoc Reference](https://img.shields.io/badge/godoc-reference-blue.svg)](https://godoc.org/github.com/ef2k/tempo)
-=======
+# tempo
+
+[![Go Reference](https://pkg.go.dev/badge/github.com/ef2k/tempo.svg)](https://pkg.go.dev/github.com/ef2k/tempo)
+[![Go Report Card](https://goreportcard.com/badge/github.com/ef2k/tempo)](https://goreportcard.com/report/github.com/ef2k/tempo)
+
 A dispatched batch queue to process items at time intervals or when a batching limit is met.
 
 ## Features
@@ -15,11 +18,16 @@ A dispatched batch queue to process items at time intervals or when a batching l
 
 ## Install
 ```sh
-$ dep ensure -add github.com/ef2k/tempo
+go get github.com/ef2k/tempo
 ```
 
 ## Documentation
-https://godoc.org/github.com/ef2k/tempo
+[pkg.go.dev/github.com/ef2k/tempo](https://pkg.go.dev/github.com/ef2k/tempo)
+
+## Test
+```sh
+go test ./...
+```
 
 ## Sample Usage
 
