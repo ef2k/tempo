@@ -1,25 +1,33 @@
 # tempo
 
-[![Go Reference](https://pkg.go.dev/badge/github.com/ef2k/tempo.svg)](https://pkg.go.dev/github.com/ef2k/tempo)
-[![Go Report Card](https://goreportcard.com/badge/github.com/ef2k/tempo)](https://goreportcard.com/report/github.com/ef2k/tempo)
+[![Go
+Reference](https://pkg.go.dev/badge/github.com/ef2k/tempo.svg)](https://pkg.go.dev/github.com/ef2k/tempo)
+[![Go Report
+Card](https://goreportcard.com/badge/github.com/ef2k/tempo)](https://goreportcard.com/report/github.com/ef2k/tempo)
 
-A channel-based batch dispatcher that emits items either when the interval expires or when the batch size limit is reached, whichever comes first.
 
-## Features
-- **Batching by periodic time intervals** <br> Set a time interval and receive accumulated items when the interval expires.
+Tempo is a thin buffer that collects high-frequency events so they can be
+processed in batches instead of one at a time.
 
-- **Dispatching as soon as a batch limit is met** <br> If a batch fills before the interval expires, it is dispatched immediately.
+Think of Tempo as a waiting room for data, instead of sending every piece of
+information the instance it arrives, it collects it until a certain amount is
+collected or when the next batch is scheduled.
 
-- **Channel-driven design** <br> The dispatcher is built around standard Go channels and timer-based scheduling.
+This approach is called "batch with timeout" and its most useful when you have
+high-frequency events with high-overhead. In other words, when you have a fire
+hose of incoming data and the way you process them (opening a connection, making
+a system call, writing to a database, calling an API)  is more expensive than
+the data itself.
 
-- **Works with arbitrary values** <br> Items are queued as `interface{}` values and emitted in batches.
+What makes it a "thin" buffer is its architecture: it’s built entirely on Go
+channels with no heavy mutex locking or complex internal state machines. This
+makes it very performant for high-concurrency environments.
 
-## Current Behavior
-- Batches are delivered on `Dispatcher.Batch` either when `MaxBatchItems` is reached or when `Interval` expires, whichever happens first.
-
-- The dispatcher coordinates producers and consumers through Go channels and timer-based scheduling.
-
-- With multiple producer goroutines, `tempo` preserves the order items are received by the dispatcher. It does not establish a strict global ordering across independent producers beyond normal channel receive order.
+Good use cases:
+- Analytics / telemetry ingestion
+- Collecting payloads before calling an external API 
+- Embedding or vector writes
+- Agent/LLM event collection
 
 ![3s demo](./examples/basic-3s-interval/tempo-3s.gif)
 
@@ -31,48 +39,11 @@ go get github.com/ef2k/tempo
 ## Documentation
 [pkg.go.dev/github.com/ef2k/tempo](https://pkg.go.dev/github.com/ef2k/tempo)
 
-## Test
-```sh
-go test ./...
-```
 
 ## Sample Usage
 
-Dispatch a batch at 10 second intervals or as soon as a batching limit of 50 items is met.
 See `examples/` for working code.
 
-```go
-// initialize
-d := tempo.NewDispatcher(&tempo.Config{
-  Interval:      time.Duration(10) * time.Second,
-  MaxBatchItems: 50,
-})
-defer d.Stop()
-go d.Start()
-
-// produce some messages
-go func() {
-  for i := 0; i < 100; i++ {
-    m := fmt.Sprintf("message #%d", i)
-    d.Q <- m
-  }
-}()
-
-// consume batches
-for {
-  select {
-  case batch := <-d.Batch:
-    for _, b := range batch {
-      s := b.(string)
-      // do whatever.
-      log.Print(s)
-    }
-  }
-}
-```
-
 ## Contribute
-Improvements, fixes, and feedback are welcome.
 
-## Legal
-MIT license.
+Improvements, fixes, and feedback are welcome.
