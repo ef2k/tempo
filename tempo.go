@@ -15,8 +15,7 @@ type Config struct {
 // NewDispatcher returns an initialized instance of Dispatcher.
 func NewDispatcher(c *Config) *Dispatcher {
 	return &Dispatcher{
-		doWork:          make(chan bool),
-		stop:            make(chan bool),
+		stop:            make(chan struct{}, 1),
 		Q:               make(chan item),
 		Batch:           make(chan []item),
 		Interval:        c.Interval,
@@ -28,9 +27,7 @@ func NewDispatcher(c *Config) *Dispatcher {
 // Dispatcher coordinates dispatching of queue items by time intervals
 // or immediately after the batching limit is met.
 type Dispatcher struct {
-	doWork          chan bool
-	stop            chan bool
-	timer           *time.Timer
+	stop            chan struct{}
 	Q               chan item
 	Batch           chan []item
 	Interval        time.Duration
@@ -38,67 +35,86 @@ type Dispatcher struct {
 	DispatchedCount int
 }
 
-func (d *Dispatcher) tick() {
-	if d.timer != nil {
-		d.timer.Reset(d.Interval)
-		return
-	}
-	d.timer = time.AfterFunc(d.Interval, func() {
-		d.doWork <- true
-	})
-}
-
-func (d *Dispatcher) dispatch(batch chan item) {
-	var items []item
-	for b := range batch {
-		items = append(items, b)
-	}
-	d.DispatchedCount += len(items)
-	d.Batch <- items
-}
-
 // Start begins item dispatching.
 func (d *Dispatcher) Start() {
-	d.tick()
-	batch := make(chan item, d.MaxBatchItems)
+	batch := make([]item, 0, d.MaxBatchItems)
+	ready := make([][]item, 0)
+
+	timer := time.NewTimer(d.Interval)
+	if !timer.Stop() {
+		select {
+		case <-timer.C:
+		default:
+		}
+	}
+	var timerCh <-chan time.Time
+
+	stopTimer := func() {
+		if timerCh == nil {
+			return
+		}
+		if !timer.Stop() {
+			select {
+			case <-timer.C:
+			default:
+			}
+		}
+		timerCh = nil
+	}
+
+	startTimer := func() {
+		if d.Interval <= 0 {
+			return
+		}
+		if timerCh != nil {
+			stopTimer()
+		}
+		timer.Reset(d.Interval)
+		timerCh = timer.C
+	}
+
+	queueBatch := func() {
+		if len(batch) == 0 {
+			return
+		}
+		ready = append(ready, append([]item(nil), batch...))
+		batch = make([]item, 0, d.MaxBatchItems)
+		stopTimer()
+	}
 
 	for {
+		var out chan []item
+		var next []item
+		if len(ready) > 0 {
+			out = d.Batch
+			next = ready[0]
+		}
+
 		select {
-		case m := <-d.Q:
-			if len(batch) < cap(batch) {
-				batch <- m
-			} else {
-				// NOTE at this point, there's no space in the
-				// batch and we have an item pending enqueue.
-				d.timer.Stop()
-				go func() {
-					d.doWork <- true
-					// enqueue into the next batch.
-					d.Q <- m
-				}()
-			}
-		case doWork := <-d.doWork:
-			if !doWork {
-				continue
-			}
-			if len(batch) <= 0 {
-				d.tick()
-				continue
-			}
-			close(batch)
-			d.dispatch(batch)
-			batch = make(chan item, d.MaxBatchItems)
-			d.tick()
 		case <-d.stop:
-			d.timer.Stop()
-			d.DispatchedCount = 0
+			stopTimer()
 			return
+		case m := <-d.Q:
+			if len(batch) == 0 {
+				startTimer()
+			}
+			batch = append(batch, m)
+			if len(batch) >= d.MaxBatchItems {
+				queueBatch()
+			}
+		case <-timerCh:
+			queueBatch()
+		case out <- next:
+			d.DispatchedCount += len(next)
+			ready = ready[1:]
 		}
 	}
 }
 
 // Stop stops the internal dispatch scheduler.
 func (d *Dispatcher) Stop() {
-	d.timer.Stop()
-	d.stop <- true
+	select {
+	case d.stop <- struct{}{}:
+	default:
+	}
 }
