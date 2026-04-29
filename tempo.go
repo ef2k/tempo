@@ -1,10 +1,16 @@
 package tempo
 
 import (
+	"context"
 	"time"
 )
 
 type item interface{}
+
+type shutdownRequest struct {
+	ctx  context.Context
+	done chan error
+}
 
 // Config configure time interval and set a batch limit.
 type Config struct {
@@ -16,6 +22,7 @@ type Config struct {
 func NewDispatcher(c *Config) *Dispatcher {
 	return &Dispatcher{
 		stop:            make(chan struct{}, 1),
+		shutdown:        make(chan shutdownRequest, 1),
 		Q:               make(chan item),
 		Batch:           make(chan []item),
 		Interval:        c.Interval,
@@ -28,6 +35,7 @@ func NewDispatcher(c *Config) *Dispatcher {
 // or immediately after the batching limit is met.
 type Dispatcher struct {
 	stop            chan struct{}
+	shutdown        chan shutdownRequest
 	Q               chan item
 	Batch           chan []item
 	Interval        time.Duration
@@ -39,6 +47,7 @@ type Dispatcher struct {
 func (d *Dispatcher) Start() {
 	batch := make([]item, 0, d.MaxBatchItems)
 	ready := make([][]item, 0)
+	var shutdown *shutdownRequest
 
 	timer := time.NewTimer(d.Interval)
 	if !timer.Stop() {
@@ -83,6 +92,10 @@ func (d *Dispatcher) Start() {
 	}
 
 	for {
+		if shutdown != nil && len(batch) > 0 {
+			queueBatch()
+		}
+
 		var out chan []item
 		var next []item
 		if len(ready) > 0 {
@@ -90,11 +103,39 @@ func (d *Dispatcher) Start() {
 			next = ready[0]
 		}
 
+		var in chan item
+		var timerTick <-chan time.Time
+		if shutdown == nil {
+			in = d.Q
+			timerTick = timerCh
+		}
+
+		var shutdownDone <-chan struct{}
+		if shutdown != nil {
+			shutdownDone = shutdown.ctx.Done()
+		}
+
 		select {
 		case <-d.stop:
 			stopTimer()
 			return
-		case m := <-d.Q:
+		case req := <-d.shutdown:
+			if shutdown != nil {
+				continue
+			}
+			stopTimer()
+			shutdown = &req
+			if len(batch) > 0 {
+				queueBatch()
+			}
+			if len(ready) == 0 {
+				shutdown.done <- nil
+				return
+			}
+		case <-shutdownDone:
+			shutdown.done <- shutdown.ctx.Err()
+			return
+		case m := <-in:
 			if len(batch) == 0 {
 				startTimer()
 			}
@@ -102,11 +143,15 @@ func (d *Dispatcher) Start() {
 			if len(batch) >= d.MaxBatchItems {
 				queueBatch()
 			}
-		case <-timerCh:
+		case <-timerTick:
 			queueBatch()
 		case out <- next:
 			d.DispatchedCount += len(next)
 			ready = ready[1:]
+			if shutdown != nil && len(ready) == 0 {
+				shutdown.done <- nil
+				return
+			}
 		}
 	}
 }
@@ -116,5 +161,26 @@ func (d *Dispatcher) Stop() {
 	select {
 	case d.stop <- struct{}{}:
 	default:
+	}
+}
+
+// Shutdown gracefully drains buffered items or returns when the context expires.
+func (d *Dispatcher) Shutdown(ctx context.Context) error {
+	req := shutdownRequest{
+		ctx:  ctx,
+		done: make(chan error, 1),
+	}
+
+	select {
+	case d.shutdown <- req:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+
+	select {
+	case err := <-req.done:
+		return err
+	case <-ctx.Done():
+		return ctx.Err()
 	}
 }

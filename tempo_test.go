@@ -1,6 +1,7 @@
 package tempo
 
 import (
+	"context"
 	"fmt"
 	"sync"
 	"testing"
@@ -54,6 +55,26 @@ func stopWithin(t *testing.T, d *Dispatcher, timeout time.Duration) {
 	case <-done:
 	case <-time.After(timeout):
 		t.Fatalf("stop timed out after %s", timeout)
+	}
+}
+
+func shutdownWithin(t *testing.T, d *Dispatcher, timeout time.Duration) error {
+	t.Helper()
+
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() {
+		done <- d.Shutdown(ctx)
+	}()
+
+	select {
+	case err := <-done:
+		return err
+	case <-time.After(timeout + 100*time.Millisecond):
+		t.Fatalf("shutdown timed out after %s", timeout)
+		return nil
 	}
 }
 
@@ -283,5 +304,116 @@ func TestBlockedBatchConsumerTrapsDispatcher(t *testing.T) {
 
 	if blocked {
 		t.Fatal("stop blocked because the dispatcher was trapped trying to dispatch a full batch")
+	}
+}
+
+// Test: Stop returns promptly without waiting for buffered items to drain.
+//
+// Here we enqueue an item into a partially filled batch and then call Stop
+// before either the interval or batch size would force a flush. The observable
+// signal is that Stop returns quickly, but the broader requirement is that the
+// immediate-stop path must not depend on draining buffered work first.
+func TestStopReturnsPromptlyWithoutDrainingBufferedItems(t *testing.T) {
+	d := NewDispatcher(&Config{
+		Interval:      time.Hour,
+		MaxBatchItems: 10,
+	})
+	go d.Start()
+
+	enqueueWithin(t, d.Q, "first", 100*time.Millisecond)
+	stopWithin(t, d, 200*time.Millisecond)
+}
+
+// Test: Stop abandons buffered items instead of flushing them.
+//
+// Here we enqueue an item and stop the dispatcher before any normal flush
+// trigger occurs. The observable signal is that no batch is emitted after Stop
+// returns, but the broader requirement is that immediate stop and graceful
+// drain are different lifecycle operations.
+func TestStopDropsBufferedItems(t *testing.T) {
+	d := NewDispatcher(&Config{
+		Interval:      time.Hour,
+		MaxBatchItems: 10,
+	})
+	go d.Start()
+
+	enqueueWithin(t, d.Q, "first", 100*time.Millisecond)
+	stopWithin(t, d, 200*time.Millisecond)
+
+	select {
+	case batch := <-d.Batch:
+		t.Fatalf("expected Stop to drop buffered items, got flushed batch %#v", batch)
+	case <-time.After(150 * time.Millisecond):
+	}
+}
+
+// Test: Shutdown flushes buffered items before returning.
+//
+// Here we enqueue an item into a partial batch and call Shutdown before any
+// timer-based flush would occur. The observable signal is that Shutdown returns
+// only after the final buffered item is emitted, but the broader requirement is
+// that graceful drain preserves in-flight work.
+func TestShutdownFlushesBufferedItemsBeforeReturning(t *testing.T) {
+	d := NewDispatcher(&Config{
+		Interval:      time.Hour,
+		MaxBatchItems: 10,
+	})
+	go d.Start()
+
+	enqueueWithin(t, d.Q, "first", 100*time.Millisecond)
+
+	done := make(chan error, 1)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		done <- d.Shutdown(ctx)
+	}()
+
+	select {
+	case err := <-done:
+		t.Fatalf("expected Shutdown to wait for buffered delivery, returned early with %v", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	batch := receiveBatchWithin(t, d.Batch, 500*time.Millisecond)
+	if len(batch) != 1 || batch[0] != "first" {
+		t.Fatalf("expected Shutdown to flush [first], got %#v", batch)
+	}
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("expected Shutdown to succeed after flushing buffered items, got %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("expected Shutdown to return after flushing buffered items")
+	}
+}
+
+// Test: Shutdown respects context cancellation when graceful drain cannot
+// complete.
+//
+// Here we enqueue enough items to form a full batch and then call Shutdown
+// without any batch consumer to receive it. The observable signal is that
+// Shutdown returns the context error, but the broader requirement is that
+// graceful drain must be externally bounded when delivery cannot finish.
+func TestShutdownReturnsContextErrorWhenDrainCannotComplete(t *testing.T) {
+	d := NewDispatcher(&Config{
+		Interval:      time.Hour,
+		MaxBatchItems: 1,
+	})
+	go d.Start()
+
+	enqueueWithin(t, d.Q, "first", 100*time.Millisecond)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+
+	err := d.Shutdown(ctx)
+	if err == nil {
+		t.Fatal("expected Shutdown to return a context error when drain cannot complete")
+	}
+	if err != context.DeadlineExceeded {
+		t.Fatalf("expected context deadline exceeded, got %v", err)
 	}
 }
