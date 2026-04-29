@@ -2,10 +2,25 @@ package tempo
 
 import (
 	"context"
+	"errors"
+	"sync"
 	"time"
 )
 
 type item interface{}
+
+var (
+	ErrStopped      = errors.New("tempo: dispatcher stopped")
+	ErrShuttingDown = errors.New("tempo: dispatcher shutting down")
+)
+
+type state int
+
+const (
+	stateRunning state = iota
+	stateShuttingDown
+	stateStopped
+)
 
 type shutdownRequest struct {
 	ctx  context.Context
@@ -34,6 +49,8 @@ func NewDispatcher(c *Config) *Dispatcher {
 // Dispatcher coordinates dispatching of queue items by time intervals
 // or immediately after the batching limit is met.
 type Dispatcher struct {
+	mu              sync.RWMutex
+	state           state
 	stop            chan struct{}
 	shutdown        chan shutdownRequest
 	Q               chan item
@@ -125,14 +142,17 @@ func (d *Dispatcher) Start() {
 			}
 			stopTimer()
 			shutdown = &req
+			d.setState(stateShuttingDown)
 			if len(batch) > 0 {
 				queueBatch()
 			}
 			if len(ready) == 0 {
+				d.setState(stateStopped)
 				shutdown.done <- nil
 				return
 			}
 		case <-shutdownDone:
+			d.setState(stateStopped)
 			shutdown.done <- shutdown.ctx.Err()
 			return
 		case m := <-in:
@@ -149,6 +169,7 @@ func (d *Dispatcher) Start() {
 			d.DispatchedCount += len(next)
 			ready = ready[1:]
 			if shutdown != nil && len(ready) == 0 {
+				d.setState(stateStopped)
 				shutdown.done <- nil
 				return
 			}
@@ -158,6 +179,7 @@ func (d *Dispatcher) Start() {
 
 // Stop stops the internal dispatch scheduler.
 func (d *Dispatcher) Stop() {
+	d.setState(stateStopped)
 	select {
 	case d.stop <- struct{}{}:
 	default:
@@ -166,6 +188,10 @@ func (d *Dispatcher) Stop() {
 
 // Shutdown gracefully drains buffered items or returns when the context expires.
 func (d *Dispatcher) Shutdown(ctx context.Context) error {
+	if err := d.enqueueStateError(); err != nil {
+		return nil
+	}
+
 	req := shutdownRequest{
 		ctx:  ctx,
 		done: make(chan error, 1),
@@ -183,4 +209,49 @@ func (d *Dispatcher) Shutdown(ctx context.Context) error {
 	case <-ctx.Done():
 		return ctx.Err()
 	}
+}
+
+// Enqueue submits an item while the dispatcher is running.
+func (d *Dispatcher) Enqueue(v any) error {
+	if err := d.enqueueStateError(); err != nil {
+		return err
+	}
+
+	select {
+	case d.Q <- v:
+		return nil
+	default:
+	}
+
+	if err := d.enqueueStateError(); err != nil {
+		return err
+	}
+
+	d.Q <- v
+	return nil
+}
+
+// Batches exposes the batch output stream as a read-only channel.
+func (d *Dispatcher) Batches() <-chan []item {
+	return d.Batch
+}
+
+func (d *Dispatcher) enqueueStateError() error {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+
+	switch d.state {
+	case stateShuttingDown:
+		return ErrShuttingDown
+	case stateStopped:
+		return ErrStopped
+	default:
+		return nil
+	}
+}
+
+func (d *Dispatcher) setState(s state) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.state = s
 }
