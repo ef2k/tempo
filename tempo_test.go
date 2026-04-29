@@ -617,3 +617,97 @@ func TestMethodBasedUsagePreservesBatchingBehavior(t *testing.T) {
 		t.Fatalf("expected flushed batch to contain first, second; got %#v", batch)
 	}
 }
+
+// Test: Stop can be called more than once.
+//
+// Repeated immediate-stop calls should be harmless.
+func TestStopIsSafeToCallMoreThanOnce(t *testing.T) {
+	d := newDispatcher(t, &Config{
+		Interval:      time.Hour,
+		MaxBatchItems: 10,
+	})
+	go d.Start()
+
+	stopWithin(t, d, 200*time.Millisecond)
+	stopWithin(t, d, 200*time.Millisecond)
+}
+
+// Test: Shutdown can be called more than once after a clean drain.
+//
+// Once Tempo has finished draining, repeated shutdown calls should not blow up.
+func TestShutdownIsSafeToCallMoreThanOnce(t *testing.T) {
+	d := newDispatcher(t, &Config{
+		Interval:      time.Hour,
+		MaxBatchItems: 10,
+	})
+	go d.Start()
+
+	if err := d.Enqueue("first"); err != nil {
+		t.Fatalf("expected Enqueue to accept items while running, got %v", err)
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		done <- d.Shutdown(ctx)
+	}()
+
+	batch := receiveBatchWithin(t, d.Batches(), 500*time.Millisecond)
+	if len(batch) != 1 || batch[0] != "first" {
+		t.Fatalf("expected Shutdown to drain [first], got %#v", batch)
+	}
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("expected first Shutdown to succeed, got %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("expected first Shutdown to complete")
+	}
+
+	if err := shutdownWithin(t, d, 200*time.Millisecond); err != nil {
+		t.Fatalf("expected second Shutdown to succeed, got %v", err)
+	}
+}
+
+// Test: Stop wins if it arrives while a graceful shutdown is in progress.
+//
+// If someone asks for an immediate stop during drain, Tempo should stop without
+// getting stuck.
+func TestStopAfterShutdownBeginsDoesNotHang(t *testing.T) {
+	d := newDispatcher(t, &Config{
+		Interval:      time.Hour,
+		MaxBatchItems: 10,
+	})
+	go d.Start()
+
+	if err := d.Enqueue("first"); err != nil {
+		t.Fatalf("expected Enqueue to accept items while running, got %v", err)
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		done <- d.Shutdown(ctx)
+	}()
+
+	select {
+	case err := <-done:
+		t.Fatalf("expected Shutdown to still be in progress, returned early with %v", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	stopWithin(t, d, 200*time.Millisecond)
+
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("expected Shutdown to stop waiting once Stop wins")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("expected Stop to break the in-progress Shutdown")
+	}
+}
