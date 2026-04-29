@@ -12,6 +12,9 @@ type item interface{}
 var (
 	ErrStopped      = errors.New("tempo: dispatcher stopped")
 	ErrShuttingDown = errors.New("tempo: dispatcher shutting down")
+	ErrNilConfig    = errors.New("tempo: nil config")
+	ErrBadInterval  = errors.New("tempo: interval must be greater than zero")
+	ErrBadMaxBatch  = errors.New("tempo: max batch items must be greater than zero")
 )
 
 type state int
@@ -34,7 +37,17 @@ type Config struct {
 }
 
 // NewDispatcher returns an initialized instance of Dispatcher.
-func NewDispatcher(c *Config) *Dispatcher {
+func NewDispatcher(c *Config) (*Dispatcher, error) {
+	if c == nil {
+		return nil, ErrNilConfig
+	}
+	if c.Interval <= 0 {
+		return nil, ErrBadInterval
+	}
+	if c.MaxBatchItems <= 0 {
+		return nil, ErrBadMaxBatch
+	}
+
 	return &Dispatcher{
 		stop:            make(chan struct{}, 1),
 		shutdown:        make(chan shutdownRequest, 1),
@@ -43,7 +56,7 @@ func NewDispatcher(c *Config) *Dispatcher {
 		Interval:        c.Interval,
 		MaxBatchItems:   c.MaxBatchItems,
 		DispatchedCount: 0,
-	}
+	}, nil
 }
 
 // Dispatcher coordinates dispatching of queue items by time intervals

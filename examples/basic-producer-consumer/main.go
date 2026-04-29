@@ -33,10 +33,13 @@ func generateEvents(d *tempo.Dispatcher, sets, items int) {
 }
 
 func main() {
-	d := tempo.NewDispatcher(&tempo.Config{
+	d, err := tempo.NewDispatcher(&tempo.Config{
 		Interval:      time.Duration(10) * time.Second,
 		MaxBatchItems: 100,
 	})
+	if err != nil {
+		log.Fatalf("new dispatcher: %v", err)
+	}
 
 	// Start the dispatcher loop before producing or consuming batches.
 	go d.Start()

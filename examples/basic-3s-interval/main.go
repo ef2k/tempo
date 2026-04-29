@@ -12,10 +12,13 @@ import (
 func main() {
 	log.SetFlags(log.Lmicroseconds)
 
-	d := tempo.NewDispatcher(&tempo.Config{
+	d, err := tempo.NewDispatcher(&tempo.Config{
 		Interval:      time.Duration(3) * time.Second,
 		MaxBatchItems: 100,
 	})
+	if err != nil {
+		log.Fatalf("new dispatcher: %v", err)
+	}
 	// Start the dispatcher loop before producing or consuming batches.
 	go d.Start()
 

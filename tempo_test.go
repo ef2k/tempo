@@ -14,6 +14,16 @@ func printf(s string, a ...interface{}) {
 	}
 }
 
+func mustNewDispatcher(t *testing.T, c *Config) *Dispatcher {
+	t.Helper()
+
+	d, err := NewDispatcher(c)
+	if err != nil {
+		t.Fatalf("expected dispatcher construction to succeed, got %v", err)
+	}
+	return d
+}
+
 func enqueueWithin(t *testing.T, q chan item, v item, timeout time.Duration) {
 	t.Helper()
 
@@ -111,6 +121,63 @@ L:
 	out <- coll
 }
 
+// Test: Reject invalid batching configuration at construction time.
+//
+// Tempo's batching guarantees depend on a real interval and a positive maximum
+// batch size. The observable signal is a constructor error, but the broader
+// requirement is that Tempo should fail fast instead of accepting
+// configuration that leads to undefined runtime behavior.
+func TestNewDispatcherRejectsInvalidConfig(t *testing.T) {
+	t.Run("nil config", func(t *testing.T) {
+		if _, err := NewDispatcher(nil); err == nil {
+			t.Fatal("expected nil config to be rejected")
+		}
+	})
+
+	t.Run("zero interval", func(t *testing.T) {
+		if _, err := NewDispatcher(&Config{Interval: 0, MaxBatchItems: 10}); err == nil {
+			t.Fatal("expected zero interval to be rejected")
+		}
+	})
+
+	t.Run("negative interval", func(t *testing.T) {
+		if _, err := NewDispatcher(&Config{Interval: -1 * time.Second, MaxBatchItems: 10}); err == nil {
+			t.Fatal("expected negative interval to be rejected")
+		}
+	})
+
+	t.Run("zero max batch items", func(t *testing.T) {
+		if _, err := NewDispatcher(&Config{Interval: time.Second, MaxBatchItems: 0}); err == nil {
+			t.Fatal("expected zero max batch items to be rejected")
+		}
+	})
+
+	t.Run("negative max batch items", func(t *testing.T) {
+		if _, err := NewDispatcher(&Config{Interval: time.Second, MaxBatchItems: -1}); err == nil {
+			t.Fatal("expected negative max batch items to be rejected")
+		}
+	})
+}
+
+// Test: Accept valid batching configuration at construction time.
+//
+// Here we construct Tempo with a positive interval and batch size. The
+// observable signal is a usable dispatcher instance, but the broader
+// requirement is that Tempo clearly distinguishes valid runtime settings from
+// invalid ones at the boundary.
+func TestNewDispatcherAcceptsValidConfig(t *testing.T) {
+	d, err := NewDispatcher(&Config{
+		Interval:      time.Second,
+		MaxBatchItems: 10,
+	})
+	if err != nil {
+		t.Fatalf("expected valid config to succeed, got %v", err)
+	}
+	if d == nil {
+		t.Fatal("expected a dispatcher instance for valid config")
+	}
+}
+
 // Test: Under concurrent production, accept a full wave of items and emit them
 // back out without dropping or inventing messages.
 //
@@ -119,7 +186,7 @@ L:
 // dispatched items, but the broader requirement is that rollover under load
 // preserves the complete produced set.
 func TestDispatchOrder(t *testing.T) {
-	d := NewDispatcher(&Config{
+	d := mustNewDispatcher(t, &Config{
 		Interval:      time.Duration(1) * time.Second,
 		MaxBatchItems: 500,
 	})
@@ -179,7 +246,7 @@ L:
 // batch is emitted right away, but the broader requirement is that rollover by
 // capacity does not depend on the timer to make progress.
 func TestFlushesImmediatelyWhenBatchIsFull(t *testing.T) {
-	d := NewDispatcher(&Config{
+	d := mustNewDispatcher(t, &Config{
 		Interval:      time.Hour,
 		MaxBatchItems: 2,
 	})
@@ -208,7 +275,7 @@ func TestFlushesImmediatelyWhenBatchIsFull(t *testing.T) {
 // that the item is eventually emitted, but the broader requirement is that
 // partial batches do not remain stranded while waiting for more traffic.
 func TestFlushesPendingItemsWhenIntervalElapses(t *testing.T) {
-	d := NewDispatcher(&Config{
+	d := mustNewDispatcher(t, &Config{
 		Interval:      50 * time.Millisecond,
 		MaxBatchItems: 10,
 	})
@@ -233,7 +300,7 @@ func TestFlushesPendingItemsWhenIntervalElapses(t *testing.T) {
 // requirement is that Tempo must not reorder a single producer's stream while
 // assembling a batch.
 func TestPreservesSequentialOrderWithinBatch(t *testing.T) {
-	d := NewDispatcher(&Config{
+	d := mustNewDispatcher(t, &Config{
 		Interval:      50 * time.Millisecond,
 		MaxBatchItems: 10,
 	})
@@ -266,7 +333,7 @@ func TestPreservesSequentialOrderWithinBatch(t *testing.T) {
 // broader. The dispatcher must preserve internal liveness even when batch
 // delivery is momentarily blocked.
 func TestBlockedBatchConsumerTrapsDispatcher(t *testing.T) {
-	d := NewDispatcher(&Config{
+	d := mustNewDispatcher(t, &Config{
 		Interval:      time.Hour,
 		MaxBatchItems: 1,
 	})
@@ -314,7 +381,7 @@ func TestBlockedBatchConsumerTrapsDispatcher(t *testing.T) {
 // signal is that Stop returns quickly, but the broader requirement is that the
 // immediate-stop path must not depend on draining buffered work first.
 func TestStopReturnsPromptlyWithoutDrainingBufferedItems(t *testing.T) {
-	d := NewDispatcher(&Config{
+	d := mustNewDispatcher(t, &Config{
 		Interval:      time.Hour,
 		MaxBatchItems: 10,
 	})
@@ -331,7 +398,7 @@ func TestStopReturnsPromptlyWithoutDrainingBufferedItems(t *testing.T) {
 // returns, but the broader requirement is that immediate stop and graceful
 // drain are different lifecycle operations.
 func TestStopDropsBufferedItems(t *testing.T) {
-	d := NewDispatcher(&Config{
+	d := mustNewDispatcher(t, &Config{
 		Interval:      time.Hour,
 		MaxBatchItems: 10,
 	})
@@ -354,7 +421,7 @@ func TestStopDropsBufferedItems(t *testing.T) {
 // only after the final buffered item is emitted, but the broader requirement is
 // that graceful drain preserves in-flight work.
 func TestShutdownFlushesBufferedItemsBeforeReturning(t *testing.T) {
-	d := NewDispatcher(&Config{
+	d := mustNewDispatcher(t, &Config{
 		Interval:      time.Hour,
 		MaxBatchItems: 10,
 	})
@@ -398,7 +465,7 @@ func TestShutdownFlushesBufferedItemsBeforeReturning(t *testing.T) {
 // Shutdown returns the context error, but the broader requirement is that
 // graceful drain must be externally bounded when delivery cannot finish.
 func TestShutdownReturnsContextErrorWhenDrainCannotComplete(t *testing.T) {
-	d := NewDispatcher(&Config{
+	d := mustNewDispatcher(t, &Config{
 		Interval:      time.Hour,
 		MaxBatchItems: 1,
 	})
@@ -424,7 +491,7 @@ func TestShutdownReturnsContextErrorWhenDrainCannotComplete(t *testing.T) {
 // way the caller has a way to know if the queue is available when adding items
 // or if its not accepting items because its in the middle of a shutdown.
 func TestEnqueueAcceptsItemsWhileRunning(t *testing.T) {
-	d := NewDispatcher(&Config{
+	d := mustNewDispatcher(t, &Config{
 		Interval:      50 * time.Millisecond,
 		MaxBatchItems: 10,
 	})
@@ -450,7 +517,7 @@ func TestEnqueueAcceptsItemsWhileRunning(t *testing.T) {
 // is that Tempo must reject new work explicitly once immediate shutdown starts
 // instead of leaving callers to block on internal channels.
 func TestEnqueueReturnsErrorAfterStop(t *testing.T) {
-	d := NewDispatcher(&Config{
+	d := mustNewDispatcher(t, &Config{
 		Interval:      time.Hour,
 		MaxBatchItems: 10,
 	})
@@ -470,7 +537,7 @@ func TestEnqueueReturnsErrorAfterStop(t *testing.T) {
 // the broader requirement is that graceful drain must stop accepting new work
 // while it finishes what's already in the buffer.
 func TestEnqueueReturnsErrorAfterShutdownBegins(t *testing.T) {
-	d := NewDispatcher(&Config{
+	d := mustNewDispatcher(t, &Config{
 		Interval:      time.Hour,
 		MaxBatchItems: 10,
 	})
@@ -519,7 +586,7 @@ func TestEnqueueReturnsErrorAfterShutdownBegins(t *testing.T) {
 // still available to callers, but the broader requirement is that Tempo can
 // expose consumption without forcing callers to depend on writing to internals.
 func TestBatchesExposesReadOnlyOutputStream(t *testing.T) {
-	d := NewDispatcher(&Config{
+	d := mustNewDispatcher(t, &Config{
 		Interval:      50 * time.Millisecond,
 		MaxBatchItems: 10,
 	})
@@ -543,7 +610,7 @@ func TestBatchesExposesReadOnlyOutputStream(t *testing.T) {
 // Here we drive both submission and consumption through Enqueue and Batches
 // rather than the directly to internals.
 func TestMethodBasedUsagePreservesBatchingBehavior(t *testing.T) {
-	d := NewDispatcher(&Config{
+	d := mustNewDispatcher(t, &Config{
 		Interval:      time.Hour,
 		MaxBatchItems: 2,
 	})
