@@ -6,8 +6,9 @@ Reference](https://pkg.go.dev/badge/github.com/ef2k/tempo.svg)](https://pkg.go.d
 Card](https://goreportcard.com/badge/github.com/ef2k/tempo)](https://goreportcard.com/report/github.com/ef2k/tempo)
 
 
-Tempo is a thin buffer for high-frequency events. It collects incoming data and
-emits it in batches instead of processing each event one at a time.
+Tempo is a thin in-process batcher for high-frequency events. It collects
+incoming data and emits it in batches instead of processing each event one at a
+time.
 
 Think of Tempo as a waiting room for data: instead of sending every event the
 instant it arrives, it holds items until enough are ready or the next batch is
@@ -20,7 +21,8 @@ connection, making a system call, writing to a database, or calling an API.
 What makes it a "thin" buffer is its architecture: its batching flow is driven
 by a single dispatcher loop and Go channels, with no heavy mutex locking or
 complex internal state machines. That helps avoid introducing heavier tools
-like RabbitMQ or Kafka if all that's needed is in-process batching.
+like RabbitMQ or Kafka if all that's needed is local in-process buffering and
+batching.
 
 Use it for:
 - Analytics and telemetry ingestion - Batch clicks, heartbeats, and errors
