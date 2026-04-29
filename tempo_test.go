@@ -30,7 +30,7 @@ func enqueueWithin(t *testing.T, q chan item, v item, timeout time.Duration) {
 	}
 }
 
-func receiveBatchWithin(t *testing.T, batches chan []item, timeout time.Duration) []item {
+func receiveBatchWithin(t *testing.T, batches <-chan []item, timeout time.Duration) []item {
 	t.Helper()
 
 	select {
@@ -415,5 +415,155 @@ func TestShutdownReturnsContextErrorWhenDrainCannotComplete(t *testing.T) {
 	}
 	if err != context.DeadlineExceeded {
 		t.Fatalf("expected context deadline exceeded, got %v", err)
+	}
+}
+
+// Test: Enqueue accepts items while the dispatcher is running.
+//
+// Interact with tempo through an API layer, encapsulating its internals. this
+// way the caller has a way to know if the queue is available when adding items
+// or if its not accepting items because its in the middle of a shutdown.
+func TestEnqueueAcceptsItemsWhileRunning(t *testing.T) {
+	d := NewDispatcher(&Config{
+		Interval:      50 * time.Millisecond,
+		MaxBatchItems: 10,
+	})
+	go d.Start()
+	t.Cleanup(func() {
+		stopWithin(t, d, 2*time.Second)
+	})
+
+	if err := d.Enqueue("first"); err != nil {
+		t.Fatalf("expected Enqueue to accept items while running, got %v", err)
+	}
+
+	batch := receiveBatchWithin(t, d.Batch, 500*time.Millisecond)
+	if len(batch) != 1 || batch[0] != "first" {
+		t.Fatalf("expected Enqueue path to emit [first], got %#v", batch)
+	}
+}
+
+// Test: Enqueue returns an error after Stop begins.
+//
+// Here we stop the dispatcher and then attempt to enqueue through the method
+// API. Tempo should signal an enqueue error, but the broader requirement
+// is that Tempo must reject new work explicitly once immediate shutdown starts
+// instead of leaving callers to block on internal channels.
+func TestEnqueueReturnsErrorAfterStop(t *testing.T) {
+	d := NewDispatcher(&Config{
+		Interval:      time.Hour,
+		MaxBatchItems: 10,
+	})
+	go d.Start()
+
+	stopWithin(t, d, 200*time.Millisecond)
+
+	if err := d.Enqueue("first"); err == nil {
+		t.Fatal("expected Enqueue to reject new work after Stop")
+	}
+}
+
+// Test: Enqueue returns an error after graceful shutdown begins.
+//
+// Here we start Shutdown and then attempt to enqueue through the method API
+// before the dispatcher exits. Tempo should signal an enqueue error, but
+// the broader requirement is that graceful drain must stop accepting new work
+// while it finishes what's already in the buffer.
+func TestEnqueueReturnsErrorAfterShutdownBegins(t *testing.T) {
+	d := NewDispatcher(&Config{
+		Interval:      time.Hour,
+		MaxBatchItems: 10,
+	})
+	go d.Start()
+
+	if err := d.Enqueue("first"); err != nil {
+		t.Fatalf("expected initial enqueue to succeed, got %v", err)
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		done <- d.Shutdown(ctx)
+	}()
+
+	select {
+	case err := <-done:
+		t.Fatalf("expected Shutdown to wait for buffered delivery, returned early with %v", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	if err := d.Enqueue("second"); err == nil {
+		t.Fatal("expected Enqueue to reject new work after Shutdown begins")
+	}
+
+	batch := receiveBatchWithin(t, d.Batch, 500*time.Millisecond)
+	if len(batch) != 1 || batch[0] != "first" {
+		t.Fatalf("expected Shutdown to drain only the owned item, got %#v", batch)
+	}
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("expected Shutdown to complete successfully, got %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("expected Shutdown to complete after draining owned work")
+	}
+}
+
+// Test: Batches exposes Tempo's output stream as a read-only API surface.
+//
+// Here we consume batches through the method API instead of reading the
+// exported channel directly. Tempo should signal that the emitted batch is
+// still available to callers, but the broader requirement is that Tempo can
+// expose consumption without forcing callers to depend on writing to internals.
+func TestBatchesExposesReadOnlyOutputStream(t *testing.T) {
+	d := NewDispatcher(&Config{
+		Interval:      50 * time.Millisecond,
+		MaxBatchItems: 10,
+	})
+	go d.Start()
+	t.Cleanup(func() {
+		stopWithin(t, d, 2*time.Second)
+	})
+
+	if err := d.Enqueue("first"); err != nil {
+		t.Fatalf("expected Enqueue to accept items while running, got %v", err)
+	}
+
+	batch := receiveBatchWithin(t, d.Batches(), 500*time.Millisecond)
+	if len(batch) != 1 || batch[0] != "first" {
+		t.Fatalf("expected Batches view to emit [first], got %#v", batch)
+	}
+}
+
+// Test: Method-based usage preserves Tempo's batching behavior.
+//
+// Here we drive both submission and consumption through Enqueue and Batches
+// rather than the directly to internals.
+func TestMethodBasedUsagePreservesBatchingBehavior(t *testing.T) {
+	d := NewDispatcher(&Config{
+		Interval:      time.Hour,
+		MaxBatchItems: 2,
+	})
+	go d.Start()
+	t.Cleanup(func() {
+		stopWithin(t, d, 2*time.Second)
+	})
+
+	if err := d.Enqueue("first"); err != nil {
+		t.Fatalf("expected first Enqueue to succeed, got %v", err)
+	}
+	if err := d.Enqueue("second"); err != nil {
+		t.Fatalf("expected second Enqueue to succeed, got %v", err)
+	}
+
+	batch := receiveBatchWithin(t, d.Batches(), 200*time.Millisecond)
+	if len(batch) != 2 {
+		t.Fatalf("expected 2 items in flushed batch, got %d", len(batch))
+	}
+	if batch[0] != "first" || batch[1] != "second" {
+		t.Fatalf("expected flushed batch to contain first, second; got %#v", batch)
 	}
 }
