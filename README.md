@@ -17,10 +17,10 @@ This "batch with timeout" approach works best when events arrive quickly and
 processing each one individually has high fixed overhead, like opening a
 connection, making a system call, writing to a database, or calling an API.
 
-What makes it a "thin" buffer is its architecture: it’s built entirely on Go
-channels with no heavy mutex locking or complex internal state machines. That
-helps avoid introducing heavier tools like RabbitMQ or Kafka if all that's
-needed is in-process batching.
+What makes it a "thin" buffer is its architecture: its batching flow is driven
+by a single dispatcher loop and Go channels, with no heavy mutex locking or
+complex internal state machines. That helps avoid introducing heavier tools
+like RabbitMQ or Kafka if all that's needed is in-process batching.
 
 Use it for:
 - Analytics and telemetry ingestion - Batch clicks, heartbeats, and errors
