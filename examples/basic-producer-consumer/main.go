@@ -58,13 +58,15 @@ func main() {
 	log.Printf("  ---")
 	go generateEvents(d, sets, items)
 
+	dispatched := 0
 	for {
 		select {
-		// Batches exposes the consumer-facing stream as receive-only.
+			// Batches exposes the consumer-facing stream as receive-only.
 		case batch := <-d.Batches():
 			log.Printf("+ Got a batch of %d items.", len(batch))
-			log.Printf("+ Dispatched so far: %d", d.DispatchedCount)
-			if d.DispatchedCount == expectedItems {
+			dispatched += len(batch)
+			log.Printf("+ Dispatched so far: %d", dispatched)
+			if dispatched == expectedItems {
 				// Use Shutdown to drain any Tempo-owned work before exiting.
 				ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 				defer cancel()

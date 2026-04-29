@@ -49,28 +49,26 @@ func NewDispatcher(c *Config) (*Dispatcher, error) {
 	}
 
 	return &Dispatcher{
-		stop:            make(chan struct{}, 1),
-		shutdown:        make(chan shutdownRequest, 1),
-		Q:               make(chan item),
-		Batch:           make(chan []item),
-		Interval:        c.Interval,
-		MaxBatchItems:   c.MaxBatchItems,
-		DispatchedCount: 0,
+		stop:          make(chan struct{}, 1),
+		shutdown:      make(chan shutdownRequest, 1),
+		Q:             make(chan item),
+		Batch:         make(chan []item),
+		Interval:      c.Interval,
+		MaxBatchItems: c.MaxBatchItems,
 	}, nil
 }
 
 // Dispatcher coordinates dispatching of queue items by time intervals
 // or immediately after the batching limit is met.
 type Dispatcher struct {
-	mu              sync.RWMutex
-	state           state
-	stop            chan struct{}
-	shutdown        chan shutdownRequest
-	Q               chan item
-	Batch           chan []item
-	Interval        time.Duration
-	MaxBatchItems   int
-	DispatchedCount int
+	mu            sync.RWMutex
+	state         state
+	stop          chan struct{}
+	shutdown      chan shutdownRequest
+	Q             chan item
+	Batch         chan []item
+	Interval      time.Duration
+	MaxBatchItems int
 }
 
 // Start begins item dispatching.
@@ -179,7 +177,6 @@ func (d *Dispatcher) Start() {
 		case <-timerTick:
 			queueBatch()
 		case out <- next:
-			d.DispatchedCount += len(next)
 			ready = ready[1:]
 			if shutdown != nil && len(ready) == 0 {
 				d.setState(stateStopped)
