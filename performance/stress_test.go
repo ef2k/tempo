@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -27,6 +28,7 @@ import (
 type soakSample struct {
 	ElapsedSeconds float64 `json:"elapsed_seconds"`
 	Produced       int64   `json:"produced"`
+	Rejected       int64   `json:"rejected"`
 	Delivered      int64   `json:"delivered"`
 	Batches        int64   `json:"batches"`
 	Backlog        int64   `json:"backlog"`
@@ -45,6 +47,7 @@ type soakSnapshot struct {
 	Environment        soakEnvironment `json:"environment"`
 	Config             soakConfig      `json:"config"`
 	Produced           int64           `json:"produced"`
+	Rejected           int64           `json:"rejected"`
 	Delivered          int64           `json:"delivered"`
 	Batches            int64           `json:"batches"`
 	AvgItemsPerSec     float64         `json:"avg_items_per_second"`
@@ -73,11 +76,12 @@ type soakEnvironment struct {
 }
 
 type soakConfig struct {
-	Interval      string `json:"interval"`
-	MaxBatchItems int    `json:"max_batch_items"`
-	NumProducers  int    `json:"num_producers"`
-	ConsumerDelay string `json:"consumer_delay"`
-	DrainTimeout  string `json:"drain_timeout"`
+	Interval        string `json:"interval"`
+	MaxBatchItems   int    `json:"max_batch_items"`
+	MaxPendingItems int    `json:"max_pending_items"`
+	NumProducers    int    `json:"num_producers"`
+	ConsumerDelay   string `json:"consumer_delay"`
+	DrainTimeout    string `json:"drain_timeout"`
 }
 
 type assessmentStatus string
@@ -96,8 +100,8 @@ type soakAssessment struct {
 	ObservedItemsPerSec   float64               `json:"observed_items_per_second"`
 	ObservedBatchesPerSec float64               `json:"observed_batches_per_second"`
 	ThroughputRangePct    float64               `json:"throughput_range_percent"`
-	Acceptance           soakAssessmentSection `json:"acceptance"`
-	Observations         soakAssessmentSection `json:"observations"`
+	Acceptance            soakAssessmentSection `json:"acceptance"`
+	Observations          soakAssessmentSection `json:"observations"`
 	Correctness           soakAssessmentSection `json:"correctness"`
 	Throughput            soakAssessmentSection `json:"throughput"`
 	Backlog               soakAssessmentSection `json:"backlog"`
@@ -186,6 +190,7 @@ func startSoakCollector(
 	environment soakEnvironment,
 	config soakConfig,
 	produced, delivered, batches *atomic.Int64,
+	rejected *atomic.Int64,
 	streamPath string,
 ) (chan struct{}, chan soakCollection, error) {
 	streamFile, err := os.Create(streamPath)
@@ -226,6 +231,7 @@ func startSoakCollector(
 			prevSampleAt = startedAt
 			recordSample = func(now time.Time) {
 				currentProduced := produced.Load()
+				currentRejected := rejected.Load()
 				currentDelivered := delivered.Load()
 				currentBatches := batches.Load()
 				backlog := currentProduced - currentDelivered
@@ -255,6 +261,7 @@ func startSoakCollector(
 				sample := soakSample{
 					ElapsedSeconds: now.Sub(startedAt).Seconds(),
 					Produced:       currentProduced,
+					Rejected:       currentRejected,
 					Delivered:      currentDelivered,
 					Batches:        currentBatches,
 					Backlog:        backlog,
@@ -638,6 +645,13 @@ func TestSoakSustainedLoadStaysHealthy(t *testing.T) {
 		Interval:      10 * time.Millisecond,
 		MaxBatchItems: 128,
 	}
+	if raw := os.Getenv("TEMPO_SOAK_MAX_PENDING_ITEMS"); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil {
+			t.Fatalf("parse TEMPO_SOAK_MAX_PENDING_ITEMS: %v", err)
+		}
+		config.MaxPendingItems = parsed
+	}
 	consumerDelay := time.Duration(0)
 	if raw := os.Getenv("TEMPO_SOAK_CONSUMER_DELAY"); raw != "" {
 		parsed, err := time.ParseDuration(raw)
@@ -661,11 +675,12 @@ func TestSoakSustainedLoadStaysHealthy(t *testing.T) {
 		CPUCount:  runtime.NumCPU(),
 	}
 	runConfig := soakConfig{
-		Interval:      config.Interval.String(),
-		MaxBatchItems: config.MaxBatchItems,
-		NumProducers:  numProducers,
-		ConsumerDelay: consumerDelay.String(),
-		DrainTimeout:  drainTimeout.String(),
+		Interval:        config.Interval.String(),
+		MaxBatchItems:   config.MaxBatchItems,
+		MaxPendingItems: config.MaxPendingItems,
+		NumProducers:    numProducers,
+		ConsumerDelay:   consumerDelay.String(),
+		DrainTimeout:    drainTimeout.String(),
 	}
 
 	d, err := tempo.NewDispatcher(&config)
@@ -676,6 +691,7 @@ func TestSoakSustainedLoadStaysHealthy(t *testing.T) {
 
 	startGoroutines := runtime.NumGoroutine()
 	var produced atomic.Int64
+	var rejected atomic.Int64
 	var delivered atomic.Int64
 	var batches atomic.Int64
 
@@ -687,6 +703,7 @@ func TestSoakSustainedLoadStaysHealthy(t *testing.T) {
 		environment,
 		runConfig,
 		&produced,
+		&rejected,
 		&delivered,
 		&batches,
 		outputPaths.streamPath,
@@ -733,6 +750,11 @@ func TestSoakSustainedLoadStaysHealthy(t *testing.T) {
 					return
 				default:
 					if err := d.Enqueue(benchEvent{id: producerID<<20 | seq, data: "soak"}); err != nil {
+						if err == tempo.ErrQueueFull {
+							rejected.Add(1)
+							time.Sleep(100 * time.Microsecond)
+							continue
+						}
 						return
 					}
 					produced.Add(1)
@@ -773,6 +795,7 @@ func TestSoakSustainedLoadStaysHealthy(t *testing.T) {
 	}
 
 	totalProduced := produced.Load()
+	totalRejected := rejected.Load()
 	totalDelivered := delivered.Load()
 	finalBacklog := totalProduced - totalDelivered
 	active := activeSoakSamples(collection.samples)
@@ -801,6 +824,7 @@ func TestSoakSustainedLoadStaysHealthy(t *testing.T) {
 		Environment:        environment,
 		Config:             runConfig,
 		Produced:           totalProduced,
+		Rejected:           totalRejected,
 		Delivered:          totalDelivered,
 		Batches:            batches.Load(),
 		AvgItemsPerSec:     avgItems,
@@ -827,7 +851,7 @@ func TestSoakSustainedLoadStaysHealthy(t *testing.T) {
 	}
 
 	fmt.Printf(
-		"\nsoak summary\n  stream: %s\n  results: %s\n  runtime: %s\n  sample interval: %s\n  consumer delay: %s\n  drain timeout: %s\n  acceptance: %s\n  observations: %s\n  produced: %d\n  delivered: %d\n  batches: %d\n  avg items/sec: %.0f\n  min items/sec: %.0f\n  max items/sec: %.0f\n  avg batches/sec: %.0f\n  throughput range: %.2f%%\n  peak backlog: %d\n  peak heap alloc: %d bytes\n  peak goroutines: %d\n  drain duration: %s\n  shutdown duration: %s\n  correctness: %s\n  throughput: %s\n  backlog: %s\n  memory: %s\n  goroutines: %s\n  drain: %s\n  overall: %s\n",
+		"\nsoak summary\n  stream: %s\n  results: %s\n  runtime: %s\n  sample interval: %s\n  consumer delay: %s\n  drain timeout: %s\n  acceptance: %s\n  observations: %s\n  produced: %d\n  rejected: %d\n  delivered: %d\n  batches: %d\n  avg items/sec: %.0f\n  min items/sec: %.0f\n  max items/sec: %.0f\n  avg batches/sec: %.0f\n  throughput range: %.2f%%\n  peak backlog: %d\n  peak heap alloc: %d bytes\n  peak goroutines: %d\n  drain duration: %s\n  shutdown duration: %s\n  correctness: %s\n  throughput: %s\n  backlog: %s\n  memory: %s\n  goroutines: %s\n  drain: %s\n  overall: %s\n",
 		outputPaths.displayStreamPath,
 		outputPaths.displaySnapshotPath,
 		snapshot.Runtime,
@@ -837,6 +861,7 @@ func TestSoakSustainedLoadStaysHealthy(t *testing.T) {
 		assessment.Acceptance.Status,
 		assessment.Observations.Status,
 		snapshot.Produced,
+		snapshot.Rejected,
 		snapshot.Delivered,
 		snapshot.Batches,
 		snapshot.AvgItemsPerSec,

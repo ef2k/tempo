@@ -156,6 +156,12 @@ func TestNewDispatcherRejectsInvalidConfig(t *testing.T) {
 			t.Fatal("expected negative max batch items to be rejected")
 		}
 	})
+
+	t.Run("negative max pending items", func(t *testing.T) {
+		if _, err := NewDispatcher(&Config{Interval: time.Second, MaxBatchItems: 10, MaxPendingItems: -1}); err == nil {
+			t.Fatal("expected negative max pending items to be rejected")
+		}
+	})
 }
 
 // Test: Accept valid config.
@@ -559,6 +565,85 @@ func TestEnqueueReturnsErrorAfterShutdownBegins(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("expected Shutdown to complete after draining owned work")
+	}
+}
+
+// Test: Enqueue rejects new work once pending ownership reaches the configured
+// boundary.
+//
+// Here we let Tempo accumulate exactly two accepted items while no consumer is
+// draining batches. The third enqueue should fail with an explicit overload
+// error instead of allowing unbounded in-memory growth.
+func TestEnqueueReturnsQueueFullAtPendingLimit(t *testing.T) {
+	d := newDispatcher(t, &Config{
+		Interval:        time.Hour,
+		MaxBatchItems:   1,
+		MaxPendingItems: 2,
+	})
+	go d.Start()
+
+	if err := d.Enqueue("first"); err != nil {
+		t.Fatalf("expected first Enqueue to succeed, got %v", err)
+	}
+	if err := d.Enqueue("second"); err != nil {
+		t.Fatalf("expected second Enqueue to succeed, got %v", err)
+	}
+	if err := d.Enqueue("third"); err != ErrQueueFull {
+		t.Fatalf("expected third Enqueue to fail with ErrQueueFull, got %v", err)
+	}
+
+	go func() {
+		<-d.Batch
+		<-d.Batch
+	}()
+
+	if err := shutdownWithin(t, d, time.Second); err != nil {
+		t.Fatalf("expected shutdown after draining limited backlog to succeed, got %v", err)
+	}
+}
+
+// Test: Enqueue starts succeeding again after pending ownership drains below
+// the configured boundary.
+//
+// Here we fill the limit, observe an overload error, then receive one batch.
+// Once Tempo no longer owns that first item, another enqueue should succeed.
+func TestEnqueueSucceedsAgainAfterPendingLimitDrains(t *testing.T) {
+	d := newDispatcher(t, &Config{
+		Interval:        time.Hour,
+		MaxBatchItems:   1,
+		MaxPendingItems: 2,
+	})
+	go d.Start()
+	t.Cleanup(func() {
+		go func() {
+			for {
+				select {
+				case <-d.Batch:
+				case <-time.After(10 * time.Millisecond):
+					return
+				}
+			}
+		}()
+		_ = shutdownWithin(t, d, time.Second)
+	})
+
+	if err := d.Enqueue("first"); err != nil {
+		t.Fatalf("expected first Enqueue to succeed, got %v", err)
+	}
+	if err := d.Enqueue("second"); err != nil {
+		t.Fatalf("expected second Enqueue to succeed, got %v", err)
+	}
+	if err := d.Enqueue("third"); err != ErrQueueFull {
+		t.Fatalf("expected third Enqueue to fail with ErrQueueFull, got %v", err)
+	}
+
+	batch := receiveBatchWithin(t, d.Batch, 200*time.Millisecond)
+	if len(batch) != 1 || batch[0] != "first" {
+		t.Fatalf("expected first drained batch to contain [first], got %#v", batch)
+	}
+
+	if err := d.Enqueue("third"); err != nil {
+		t.Fatalf("expected Enqueue to succeed once pending ownership dropped, got %v", err)
 	}
 }
 
