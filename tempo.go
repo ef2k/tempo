@@ -249,6 +249,21 @@ func (d *Dispatcher) Enqueue(v any) error {
 	if err := d.enqueueStateError(); err != nil {
 		return err
 	}
+	if d.pendingSlots == nil {
+		select {
+		case d.Q <- v:
+			return nil
+		default:
+		}
+
+		if err := d.enqueueStateError(); err != nil {
+			return err
+		}
+
+		d.Q <- v
+		return nil
+	}
+
 	if err := d.reservePendingSlot(); err != nil {
 		return err
 	}
