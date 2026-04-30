@@ -19,4 +19,4 @@ stress:
 
 soak: SOAK_DURATION ?= 5m
 soak:
-	TEMPO_RUN_SOAK=1 TEMPO_SOAK_DURATION=$(SOAK_DURATION) gotestsum -- -run '^TestSoakSustainedLoadStaysHealthy$$' ./performance
+	TEMPO_RUN_SOAK=1 TEMPO_SOAK_DURATION=$(SOAK_DURATION) go test -v -run '^TestSoakSustainedLoadStaysHealthy$$' ./performance
