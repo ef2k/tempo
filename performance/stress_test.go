@@ -47,6 +47,13 @@ type soakSnapshot struct {
 	Produced           int64           `json:"produced"`
 	Delivered          int64           `json:"delivered"`
 	Batches            int64           `json:"batches"`
+	AvgItemsPerSec     float64         `json:"avg_items_per_second"`
+	MinItemsPerSec     float64         `json:"min_items_per_second"`
+	MaxItemsPerSec     float64         `json:"max_items_per_second"`
+	AvgBatchesPerSec   float64         `json:"avg_batches_per_second"`
+	MinBatchesPerSec   float64         `json:"min_batches_per_second"`
+	MaxBatchesPerSec   float64         `json:"max_batches_per_second"`
+	ThroughputRangePct float64         `json:"throughput_range_percent"`
 	FinalBacklog       int64           `json:"final_backlog"`
 	PeakBacklog        int64           `json:"peak_backlog"`
 	PeakHeapAllocBytes uint64          `json:"peak_heap_alloc_bytes"`
@@ -55,6 +62,7 @@ type soakSnapshot struct {
 	FinalGoroutines    int             `json:"final_goroutines"`
 	DrainDuration      string          `json:"drain_duration"`
 	ShutdownDuration   string          `json:"shutdown_duration"`
+	Assessment         soakAssessment  `json:"assessment"`
 }
 
 type soakEnvironment struct {
@@ -108,13 +116,20 @@ type soakCollection struct {
 	streamErr          error
 }
 
+type soakStreamHeader struct {
+	Type           string          `json:"type"`
+	StartedAt      time.Time       `json:"started_at"`
+	Runtime        string          `json:"runtime"`
+	SampleInterval string          `json:"sample_interval"`
+	Environment    soakEnvironment `json:"environment"`
+	Config         soakConfig      `json:"config"`
+}
+
 type soakOutputPaths struct {
-	snapshotPath          string
-	streamPath            string
-	assessmentPath        string
-	displaySnapshotPath   string
-	displayStreamPath     string
-	displayAssessmentPath string
+	snapshotPath        string
+	streamPath          string
+	displaySnapshotPath string
+	displayStreamPath   string
 }
 
 func soakSampleInterval(runFor time.Duration) time.Duration {
@@ -153,18 +168,19 @@ func prepareSoakOutputPaths(startedAt time.Time, runtime string) (soakOutputPath
 
 	base := soakFilenameBase(startedAt, runtime)
 	return soakOutputPaths{
-		snapshotPath:          filepath.Join(outDir, base+"-results.json"),
-		streamPath:            filepath.Join(outDir, base+".jsonl"),
-		assessmentPath:        filepath.Join(outDir, base+"-assessment.json"),
-		displaySnapshotPath:   filepath.Join(displayDir, base+"-results.json"),
-		displayStreamPath:     filepath.Join(displayDir, base+".jsonl"),
-		displayAssessmentPath: filepath.Join(displayDir, base+"-assessment.json"),
+		snapshotPath:        filepath.Join(outDir, base+"-results.json"),
+		streamPath:          filepath.Join(outDir, base+".jsonl"),
+		displaySnapshotPath: filepath.Join(displayDir, base+"-results.json"),
+		displayStreamPath:   filepath.Join(displayDir, base+".jsonl"),
 	}, nil
 }
 
 func startSoakCollector(
 	startedAt time.Time,
+	runFor time.Duration,
 	sampleEvery time.Duration,
+	environment soakEnvironment,
+	config soakConfig,
 	produced, delivered, batches *atomic.Int64,
 	streamPath string,
 ) (chan struct{}, chan soakCollection, error) {
@@ -182,6 +198,22 @@ func startSoakCollector(
 		ticker := time.NewTicker(sampleEvery)
 		defer ticker.Stop()
 		encoder := json.NewEncoder(streamFile)
+		header := soakStreamHeader{
+			Type:           "run_header",
+			StartedAt:      startedAt,
+			Runtime:        runFor.String(),
+			SampleInterval: sampleEvery.String(),
+			Environment:    environment,
+			Config:         config,
+		}
+		if err := encoder.Encode(header); err != nil {
+			done <- soakCollection{streamErr: err}
+			return
+		}
+		if err := streamFile.Sync(); err != nil {
+			done <- soakCollection{streamErr: err}
+			return
+		}
 
 		var (
 			collection   soakCollection
@@ -274,20 +306,6 @@ func writeSoakSnapshot(snapshot soakSnapshot, path string) error {
 	return nil
 }
 
-func writeSoakAssessment(assessment soakAssessment, path string) error {
-	data, err := json.MarshalIndent(assessment, "", "  ")
-	if err != nil {
-		return err
-	}
-	data = append(data, '\n')
-
-	if err := os.WriteFile(path, data, 0o644); err != nil {
-		return err
-	}
-
-	return nil
-}
-
 func activeSoakSamples(samples []soakSample) []soakSample {
 	if len(samples) <= 1 {
 		return samples
@@ -295,12 +313,14 @@ func activeSoakSamples(samples []soakSample) []soakSample {
 	return samples[:len(samples)-1]
 }
 
-func throughputStats(samples []soakSample) (avgItems, avgBatches, minItems, maxItems float64) {
+func throughputStats(samples []soakSample) (avgItems, avgBatches, minItems, maxItems, minBatches, maxBatches float64) {
 	if len(samples) == 0 {
-		return 0, 0, 0, 0
+		return 0, 0, 0, 0, 0, 0
 	}
 	minItems = samples[0].ItemsPerSecond
 	maxItems = samples[0].ItemsPerSecond
+	minBatches = samples[0].BatchesPerSec
+	maxBatches = samples[0].BatchesPerSec
 	for _, sample := range samples {
 		avgItems += sample.ItemsPerSecond
 		avgBatches += sample.BatchesPerSec
@@ -310,10 +330,16 @@ func throughputStats(samples []soakSample) (avgItems, avgBatches, minItems, maxI
 		if sample.ItemsPerSecond > maxItems {
 			maxItems = sample.ItemsPerSecond
 		}
+		if sample.BatchesPerSec < minBatches {
+			minBatches = sample.BatchesPerSec
+		}
+		if sample.BatchesPerSec > maxBatches {
+			maxBatches = sample.BatchesPerSec
+		}
 	}
 	avgItems /= float64(len(samples))
 	avgBatches /= float64(len(samples))
-	return avgItems, avgBatches, minItems, maxItems
+	return avgItems, avgBatches, minItems, maxItems, minBatches, maxBatches
 }
 
 func heapRecovered(samples []soakSample, peak uint64) bool {
@@ -330,12 +356,6 @@ func heapRecovered(samples []soakSample, peak uint64) bool {
 
 func makeAssessment(snapshot soakSnapshot, samples []soakSample, startGoroutines int, outputPaths soakOutputPaths) soakAssessment {
 	active := activeSoakSamples(samples)
-	avgItems, avgBatches, minItems, maxItems := throughputStats(active)
-	rangePct := 0.0
-	if avgItems > 0 {
-		rangePct = (maxItems - minItems) / avgItems
-	}
-
 	correctness := soakAssessmentSection{Status: assessmentPass}
 	if snapshot.Produced != snapshot.Delivered || snapshot.FinalBacklog != 0 {
 		correctness.Status = assessmentFail
@@ -347,17 +367,17 @@ func makeAssessment(snapshot soakSnapshot, samples []soakSample, startGoroutines
 
 	throughput := soakAssessmentSection{Status: assessmentPass}
 	switch {
-	case avgItems == 0:
+	case snapshot.AvgItemsPerSec == 0:
 		throughput.Status = assessmentFail
-	case rangePct > 0.25:
+	case snapshot.ThroughputRangePct > 25:
 		throughput.Status = assessmentFail
-	case rangePct > 0.10:
+	case snapshot.ThroughputRangePct > 10:
 		throughput.Status = assessmentWarn
 	}
 	throughput.Notes = []string{
-		fmt.Sprintf("avg items/sec=%.0f", avgItems),
-		fmt.Sprintf("avg batches/sec=%.0f", avgBatches),
-		fmt.Sprintf("throughput range=%.2f%%", rangePct*100),
+		fmt.Sprintf("avg items/sec=%.0f", snapshot.AvgItemsPerSec),
+		fmt.Sprintf("avg batches/sec=%.0f", snapshot.AvgBatchesPerSec),
+		fmt.Sprintf("throughput range=%.2f%%", snapshot.ThroughputRangePct),
 	}
 
 	backlog := soakAssessmentSection{Status: assessmentPass}
@@ -440,9 +460,9 @@ func makeAssessment(snapshot soakSnapshot, samples []soakSample, startGoroutines
 		Runtime:               snapshot.Runtime,
 		StreamPath:            outputPaths.displayStreamPath,
 		ResultsPath:           outputPaths.displaySnapshotPath,
-		ObservedItemsPerSec:   avgItems,
-		ObservedBatchesPerSec: avgBatches,
-		ThroughputRangePct:    rangePct * 100,
+		ObservedItemsPerSec:   snapshot.AvgItemsPerSec,
+		ObservedBatchesPerSec: snapshot.AvgBatchesPerSec,
+		ThroughputRangePct:    snapshot.ThroughputRangePct,
 		Correctness:           correctness,
 		Throughput:            throughput,
 		Backlog:               backlog,
@@ -558,6 +578,17 @@ func TestSoakSustainedLoadStaysHealthy(t *testing.T) {
 		Interval:      10 * time.Millisecond,
 		MaxBatchItems: 128,
 	}
+	environment := soakEnvironment{
+		GoOS:      runtime.GOOS,
+		GoArch:    runtime.GOARCH,
+		GoVersion: runtime.Version(),
+		CPUCount:  runtime.NumCPU(),
+	}
+	runConfig := soakConfig{
+		Interval:      config.Interval.String(),
+		MaxBatchItems: config.MaxBatchItems,
+		NumProducers:  numProducers,
+	}
 
 	d, err := tempo.NewDispatcher(&config)
 	if err != nil {
@@ -573,7 +604,10 @@ func TestSoakSustainedLoadStaysHealthy(t *testing.T) {
 	sampleEvery := soakSampleInterval(runFor)
 	stopSampling, samplingDone, err := startSoakCollector(
 		startedAt,
+		runFor,
 		sampleEvery,
+		environment,
+		runConfig,
 		&produced,
 		&delivered,
 		&batches,
@@ -584,10 +618,9 @@ func TestSoakSustainedLoadStaysHealthy(t *testing.T) {
 	}
 
 	fmt.Printf(
-		"\nsoak output\n  stream: %s\n  results: %s\n  assessment: %s\n\n",
+		"\nsoak output\n  stream: %s\n  results: %s\n\n",
 		outputPaths.displayStreamPath,
 		outputPaths.displaySnapshotPath,
-		outputPaths.displayAssessmentPath,
 	)
 
 	stopConsumers := make(chan struct{})
@@ -658,6 +691,12 @@ func TestSoakSustainedLoadStaysHealthy(t *testing.T) {
 	totalProduced := produced.Load()
 	totalDelivered := delivered.Load()
 	finalBacklog := totalProduced - totalDelivered
+	active := activeSoakSamples(collection.samples)
+	avgItems, avgBatches, minItems, maxItems, minBatches, maxBatches := throughputStats(active)
+	rangePct := 0.0
+	if avgItems > 0 {
+		rangePct = ((maxItems - minItems) / avgItems) * 100
+	}
 
 	if totalDelivered == 0 {
 		t.Fatal("expected soak run to deliver some items")
@@ -672,23 +711,21 @@ func TestSoakSustainedLoadStaysHealthy(t *testing.T) {
 	}
 
 	snapshot := soakSnapshot{
-		StartedAt:      startedAt,
-		Runtime:        runFor.String(),
-		SampleInterval: sampleEvery.String(),
-		Environment: soakEnvironment{
-			GoOS:      runtime.GOOS,
-			GoArch:    runtime.GOARCH,
-			GoVersion: runtime.Version(),
-			CPUCount:  runtime.NumCPU(),
-		},
-		Config: soakConfig{
-			Interval:      config.Interval.String(),
-			MaxBatchItems: config.MaxBatchItems,
-			NumProducers:  numProducers,
-		},
+		StartedAt:          startedAt,
+		Runtime:            runFor.String(),
+		SampleInterval:     sampleEvery.String(),
+		Environment:        environment,
+		Config:             runConfig,
 		Produced:           totalProduced,
 		Delivered:          totalDelivered,
 		Batches:            batches.Load(),
+		AvgItemsPerSec:     avgItems,
+		MinItemsPerSec:     minItems,
+		MaxItemsPerSec:     maxItems,
+		AvgBatchesPerSec:   avgBatches,
+		MinBatchesPerSec:   minBatches,
+		MaxBatchesPerSec:   maxBatches,
+		ThroughputRangePct: rangePct,
 		FinalBacklog:       finalBacklog,
 		PeakBacklog:        collection.peakBacklog,
 		PeakHeapAllocBytes: collection.peakHeapAllocBytes,
@@ -699,25 +736,26 @@ func TestSoakSustainedLoadStaysHealthy(t *testing.T) {
 		ShutdownDuration:   shutdownDuration.String(),
 	}
 
+	assessment := makeAssessment(snapshot, collection.samples, startGoroutines, outputPaths)
+	snapshot.Assessment = assessment
 	if err := writeSoakSnapshot(snapshot, outputPaths.snapshotPath); err != nil {
 		t.Fatalf("write soak snapshot: %v", err)
 	}
 
-	assessment := makeAssessment(snapshot, collection.samples, startGoroutines, outputPaths)
-	if err := writeSoakAssessment(assessment, outputPaths.assessmentPath); err != nil {
-		t.Fatalf("write soak assessment: %v", err)
-	}
-
 	fmt.Printf(
-		"\nsoak summary\n  stream: %s\n  results: %s\n  assessment: %s\n  runtime: %s\n  sample interval: %s\n  produced: %d\n  delivered: %d\n  batches: %d\n  peak backlog: %d\n  peak heap alloc: %d bytes\n  peak goroutines: %d\n  drain duration: %s\n  shutdown duration: %s\n  correctness: %s\n  throughput: %s\n  backlog: %s\n  memory: %s\n  goroutines: %s\n  drain: %s\n  overall: %s\n",
+		"\nsoak summary\n  stream: %s\n  results: %s\n  runtime: %s\n  sample interval: %s\n  produced: %d\n  delivered: %d\n  batches: %d\n  avg items/sec: %.0f\n  min items/sec: %.0f\n  max items/sec: %.0f\n  avg batches/sec: %.0f\n  throughput range: %.2f%%\n  peak backlog: %d\n  peak heap alloc: %d bytes\n  peak goroutines: %d\n  drain duration: %s\n  shutdown duration: %s\n  correctness: %s\n  throughput: %s\n  backlog: %s\n  memory: %s\n  goroutines: %s\n  drain: %s\n  overall: %s\n",
 		outputPaths.displayStreamPath,
 		outputPaths.displaySnapshotPath,
-		outputPaths.displayAssessmentPath,
 		snapshot.Runtime,
 		snapshot.SampleInterval,
 		snapshot.Produced,
 		snapshot.Delivered,
 		snapshot.Batches,
+		snapshot.AvgItemsPerSec,
+		snapshot.MinItemsPerSec,
+		snapshot.MaxItemsPerSec,
+		snapshot.AvgBatchesPerSec,
+		snapshot.ThroughputRangePct,
 		snapshot.PeakBacklog,
 		snapshot.PeakHeapAllocBytes,
 		snapshot.PeakGoroutines,
