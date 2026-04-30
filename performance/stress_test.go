@@ -39,18 +39,65 @@ type soakSample struct {
 }
 
 type soakSnapshot struct {
-	StartedAt          time.Time `json:"started_at"`
-	Runtime            string    `json:"runtime"`
-	SampleInterval     string    `json:"sample_interval"`
-	Produced           int64     `json:"produced"`
-	Delivered          int64     `json:"delivered"`
-	Batches            int64     `json:"batches"`
-	FinalBacklog       int64     `json:"final_backlog"`
-	PeakBacklog        int64     `json:"peak_backlog"`
-	PeakHeapAllocBytes uint64    `json:"peak_heap_alloc_bytes"`
-	PeakGoroutines     int       `json:"peak_goroutines"`
-	DrainDuration      string    `json:"drain_duration"`
-	ShutdownDuration   string    `json:"shutdown_duration"`
+	StartedAt          time.Time       `json:"started_at"`
+	Runtime            string          `json:"runtime"`
+	SampleInterval     string          `json:"sample_interval"`
+	Environment        soakEnvironment `json:"environment"`
+	Config             soakConfig      `json:"config"`
+	Produced           int64           `json:"produced"`
+	Delivered          int64           `json:"delivered"`
+	Batches            int64           `json:"batches"`
+	FinalBacklog       int64           `json:"final_backlog"`
+	PeakBacklog        int64           `json:"peak_backlog"`
+	PeakHeapAllocBytes uint64          `json:"peak_heap_alloc_bytes"`
+	FinalHeapAlloc     uint64          `json:"final_heap_alloc_bytes"`
+	PeakGoroutines     int             `json:"peak_goroutines"`
+	FinalGoroutines    int             `json:"final_goroutines"`
+	DrainDuration      string          `json:"drain_duration"`
+	ShutdownDuration   string          `json:"shutdown_duration"`
+}
+
+type soakEnvironment struct {
+	GoOS      string `json:"goos"`
+	GoArch    string `json:"goarch"`
+	GoVersion string `json:"go_version"`
+	CPUCount  int    `json:"cpu_count"`
+}
+
+type soakConfig struct {
+	Interval      string `json:"interval"`
+	MaxBatchItems int    `json:"max_batch_items"`
+	NumProducers  int    `json:"num_producers"`
+}
+
+type assessmentStatus string
+
+const (
+	assessmentPass assessmentStatus = "pass"
+	assessmentWarn assessmentStatus = "warn"
+	assessmentFail assessmentStatus = "fail"
+)
+
+type soakAssessment struct {
+	StartedAt             time.Time             `json:"started_at"`
+	Runtime               string                `json:"runtime"`
+	StreamPath            string                `json:"stream_path"`
+	ResultsPath           string                `json:"results_path"`
+	ObservedItemsPerSec   float64               `json:"observed_items_per_second"`
+	ObservedBatchesPerSec float64               `json:"observed_batches_per_second"`
+	ThroughputRangePct    float64               `json:"throughput_range_percent"`
+	Correctness           soakAssessmentSection `json:"correctness"`
+	Throughput            soakAssessmentSection `json:"throughput"`
+	Backlog               soakAssessmentSection `json:"backlog"`
+	Memory                soakAssessmentSection `json:"memory"`
+	Goroutines            soakAssessmentSection `json:"goroutines"`
+	Drain                 soakAssessmentSection `json:"drain"`
+	Overall               soakAssessmentSection `json:"overall"`
+}
+
+type soakAssessmentSection struct {
+	Status assessmentStatus `json:"status"`
+	Notes  []string         `json:"notes"`
 }
 
 type soakCollection struct {
@@ -62,10 +109,12 @@ type soakCollection struct {
 }
 
 type soakOutputPaths struct {
-	snapshotPath        string
-	streamPath          string
-	displaySnapshotPath string
-	displayStreamPath   string
+	snapshotPath          string
+	streamPath            string
+	assessmentPath        string
+	displaySnapshotPath   string
+	displayStreamPath     string
+	displayAssessmentPath string
 }
 
 func soakSampleInterval(runFor time.Duration) time.Duration {
@@ -104,10 +153,12 @@ func prepareSoakOutputPaths(startedAt time.Time, runtime string) (soakOutputPath
 
 	base := soakFilenameBase(startedAt, runtime)
 	return soakOutputPaths{
-		snapshotPath:        filepath.Join(outDir, base+"-results.json"),
-		streamPath:          filepath.Join(outDir, base+".jsonl"),
-		displaySnapshotPath: filepath.Join(displayDir, base+"-results.json"),
-		displayStreamPath:   filepath.Join(displayDir, base+".jsonl"),
+		snapshotPath:          filepath.Join(outDir, base+"-results.json"),
+		streamPath:            filepath.Join(outDir, base+".jsonl"),
+		assessmentPath:        filepath.Join(outDir, base+"-assessment.json"),
+		displaySnapshotPath:   filepath.Join(displayDir, base+"-results.json"),
+		displayStreamPath:     filepath.Join(displayDir, base+".jsonl"),
+		displayAssessmentPath: filepath.Join(displayDir, base+"-assessment.json"),
 	}, nil
 }
 
@@ -223,6 +274,185 @@ func writeSoakSnapshot(snapshot soakSnapshot, path string) error {
 	return nil
 }
 
+func writeSoakAssessment(assessment soakAssessment, path string) error {
+	data, err := json.MarshalIndent(assessment, "", "  ")
+	if err != nil {
+		return err
+	}
+	data = append(data, '\n')
+
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func activeSoakSamples(samples []soakSample) []soakSample {
+	if len(samples) <= 1 {
+		return samples
+	}
+	return samples[:len(samples)-1]
+}
+
+func throughputStats(samples []soakSample) (avgItems, avgBatches, minItems, maxItems float64) {
+	if len(samples) == 0 {
+		return 0, 0, 0, 0
+	}
+	minItems = samples[0].ItemsPerSecond
+	maxItems = samples[0].ItemsPerSecond
+	for _, sample := range samples {
+		avgItems += sample.ItemsPerSecond
+		avgBatches += sample.BatchesPerSec
+		if sample.ItemsPerSecond < minItems {
+			minItems = sample.ItemsPerSecond
+		}
+		if sample.ItemsPerSecond > maxItems {
+			maxItems = sample.ItemsPerSecond
+		}
+	}
+	avgItems /= float64(len(samples))
+	avgBatches /= float64(len(samples))
+	return avgItems, avgBatches, minItems, maxItems
+}
+
+func heapRecovered(samples []soakSample, peak uint64) bool {
+	if peak == 0 {
+		return false
+	}
+	for _, sample := range samples {
+		if sample.HeapAllocBytes <= peak/2 {
+			return true
+		}
+	}
+	return false
+}
+
+func makeAssessment(snapshot soakSnapshot, samples []soakSample, startGoroutines int, outputPaths soakOutputPaths) soakAssessment {
+	active := activeSoakSamples(samples)
+	avgItems, avgBatches, minItems, maxItems := throughputStats(active)
+	rangePct := 0.0
+	if avgItems > 0 {
+		rangePct = (maxItems - minItems) / avgItems
+	}
+
+	correctness := soakAssessmentSection{Status: assessmentPass}
+	if snapshot.Produced != snapshot.Delivered || snapshot.FinalBacklog != 0 {
+		correctness.Status = assessmentFail
+	}
+	correctness.Notes = []string{
+		fmt.Sprintf("produced=%d delivered=%d", snapshot.Produced, snapshot.Delivered),
+		fmt.Sprintf("final backlog=%d", snapshot.FinalBacklog),
+	}
+
+	throughput := soakAssessmentSection{Status: assessmentPass}
+	switch {
+	case avgItems == 0:
+		throughput.Status = assessmentFail
+	case rangePct > 0.25:
+		throughput.Status = assessmentFail
+	case rangePct > 0.10:
+		throughput.Status = assessmentWarn
+	}
+	throughput.Notes = []string{
+		fmt.Sprintf("avg items/sec=%.0f", avgItems),
+		fmt.Sprintf("avg batches/sec=%.0f", avgBatches),
+		fmt.Sprintf("throughput range=%.2f%%", rangePct*100),
+	}
+
+	backlog := soakAssessmentSection{Status: assessmentPass}
+	switch {
+	case snapshot.FinalBacklog != 0:
+		backlog.Status = assessmentFail
+	case snapshot.PeakBacklog > int64(snapshot.Config.MaxBatchItems*2):
+		backlog.Status = assessmentWarn
+	}
+	backlog.Notes = []string{
+		fmt.Sprintf("peak backlog=%d", snapshot.PeakBacklog),
+		fmt.Sprintf("max batch items=%d", snapshot.Config.MaxBatchItems),
+	}
+
+	memory := soakAssessmentSection{Status: assessmentPass}
+	switch {
+	case snapshot.PeakHeapAllocBytes > 64<<20:
+		memory.Status = assessmentFail
+	case !heapRecovered(active, snapshot.PeakHeapAllocBytes):
+		memory.Status = assessmentWarn
+	}
+	var gcCycles uint32
+	if len(samples) > 0 {
+		gcCycles = samples[len(samples)-1].GCCycles
+	}
+	memory.Notes = []string{
+		fmt.Sprintf("peak heap alloc=%d bytes", snapshot.PeakHeapAllocBytes),
+		fmt.Sprintf("final heap alloc=%d bytes", snapshot.FinalHeapAlloc),
+		fmt.Sprintf("gc cycles observed=%d", gcCycles),
+	}
+
+	goroutines := soakAssessmentSection{Status: assessmentPass}
+	switch {
+	case snapshot.FinalGoroutines > startGoroutines+16:
+		goroutines.Status = assessmentFail
+	case snapshot.PeakGoroutines > startGoroutines+snapshot.Config.NumProducers+8:
+		goroutines.Status = assessmentWarn
+	}
+	goroutines.Notes = []string{
+		fmt.Sprintf("start goroutines=%d", startGoroutines),
+		fmt.Sprintf("peak goroutines=%d", snapshot.PeakGoroutines),
+		fmt.Sprintf("final goroutines=%d", snapshot.FinalGoroutines),
+	}
+
+	drain := soakAssessmentSection{Status: assessmentPass}
+	drainDuration, _ := time.ParseDuration(snapshot.DrainDuration)
+	shutdownDuration, _ := time.ParseDuration(snapshot.ShutdownDuration)
+	switch {
+	case drainDuration > time.Second || shutdownDuration > 500*time.Millisecond:
+		drain.Status = assessmentFail
+	case drainDuration > 100*time.Millisecond || shutdownDuration > 50*time.Millisecond:
+		drain.Status = assessmentWarn
+	}
+	drain.Notes = []string{
+		fmt.Sprintf("drain duration=%s", snapshot.DrainDuration),
+		fmt.Sprintf("shutdown duration=%s", snapshot.ShutdownDuration),
+	}
+
+	overall := soakAssessmentSection{Status: assessmentPass}
+	for _, section := range []soakAssessmentSection{correctness, throughput, backlog, memory, goroutines, drain} {
+		if section.Status == assessmentFail {
+			overall.Status = assessmentFail
+			break
+		}
+		if section.Status == assessmentWarn {
+			overall.Status = assessmentWarn
+		}
+	}
+	switch overall.Status {
+	case assessmentPass:
+		overall.Notes = []string{"the soak run looks healthy across correctness, throughput, backlog, memory, goroutines, and drain behavior"}
+	case assessmentWarn:
+		overall.Notes = []string{"the soak run completed, but one or more categories need a closer look"}
+	default:
+		overall.Notes = []string{"the soak run exposed at least one category that does not meet the expected bar"}
+	}
+
+	return soakAssessment{
+		StartedAt:             snapshot.StartedAt,
+		Runtime:               snapshot.Runtime,
+		StreamPath:            outputPaths.displayStreamPath,
+		ResultsPath:           outputPaths.displaySnapshotPath,
+		ObservedItemsPerSec:   avgItems,
+		ObservedBatchesPerSec: avgBatches,
+		ThroughputRangePct:    rangePct * 100,
+		Correctness:           correctness,
+		Throughput:            throughput,
+		Backlog:               backlog,
+		Memory:                memory,
+		Goroutines:            goroutines,
+		Drain:                 drain,
+		Overall:               overall,
+	}
+}
+
 func waitForSettledDelivery(produced, delivered *atomic.Int64, timeout time.Duration) bool {
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
@@ -323,16 +553,17 @@ func TestSoakSustainedLoadStaysHealthy(t *testing.T) {
 		t.Fatalf("prepare soak output paths: %v", err)
 	}
 
-	d, err := tempo.NewDispatcher(&tempo.Config{
+	const numProducers = 32
+	config := tempo.Config{
 		Interval:      10 * time.Millisecond,
 		MaxBatchItems: 128,
-	})
+	}
+
+	d, err := tempo.NewDispatcher(&config)
 	if err != nil {
 		t.Fatalf("new dispatcher: %v", err)
 	}
 	go d.Start()
-
-	const numProducers = 32
 
 	startGoroutines := runtime.NumGoroutine()
 	var produced atomic.Int64
@@ -353,9 +584,10 @@ func TestSoakSustainedLoadStaysHealthy(t *testing.T) {
 	}
 
 	fmt.Printf(
-		"\nsoak output\n  stream: %s\n  snapshot: %s\n\n",
+		"\nsoak output\n  stream: %s\n  results: %s\n  assessment: %s\n\n",
 		outputPaths.displayStreamPath,
 		outputPaths.displaySnapshotPath,
+		outputPaths.displayAssessmentPath,
 	)
 
 	stopConsumers := make(chan struct{})
@@ -440,16 +672,29 @@ func TestSoakSustainedLoadStaysHealthy(t *testing.T) {
 	}
 
 	snapshot := soakSnapshot{
-		StartedAt:          startedAt,
-		Runtime:            runFor.String(),
-		SampleInterval:     sampleEvery.String(),
+		StartedAt:      startedAt,
+		Runtime:        runFor.String(),
+		SampleInterval: sampleEvery.String(),
+		Environment: soakEnvironment{
+			GoOS:      runtime.GOOS,
+			GoArch:    runtime.GOARCH,
+			GoVersion: runtime.Version(),
+			CPUCount:  runtime.NumCPU(),
+		},
+		Config: soakConfig{
+			Interval:      config.Interval.String(),
+			MaxBatchItems: config.MaxBatchItems,
+			NumProducers:  numProducers,
+		},
 		Produced:           totalProduced,
 		Delivered:          totalDelivered,
 		Batches:            batches.Load(),
 		FinalBacklog:       finalBacklog,
 		PeakBacklog:        collection.peakBacklog,
 		PeakHeapAllocBytes: collection.peakHeapAllocBytes,
+		FinalHeapAlloc:     collection.samples[len(collection.samples)-1].HeapAllocBytes,
 		PeakGoroutines:     collection.peakGoroutines,
+		FinalGoroutines:    endGoroutines,
 		DrainDuration:      drainDuration.String(),
 		ShutdownDuration:   shutdownDuration.String(),
 	}
@@ -458,10 +703,16 @@ func TestSoakSustainedLoadStaysHealthy(t *testing.T) {
 		t.Fatalf("write soak snapshot: %v", err)
 	}
 
+	assessment := makeAssessment(snapshot, collection.samples, startGoroutines, outputPaths)
+	if err := writeSoakAssessment(assessment, outputPaths.assessmentPath); err != nil {
+		t.Fatalf("write soak assessment: %v", err)
+	}
+
 	fmt.Printf(
-		"\nsoak summary\n  stream: %s\n  snapshot: %s\n  runtime: %s\n  sample interval: %s\n  produced: %d\n  delivered: %d\n  batches: %d\n  peak backlog: %d\n  peak heap alloc: %d bytes\n  peak goroutines: %d\n  drain duration: %s\n  shutdown duration: %s\n",
+		"\nsoak summary\n  stream: %s\n  results: %s\n  assessment: %s\n  runtime: %s\n  sample interval: %s\n  produced: %d\n  delivered: %d\n  batches: %d\n  peak backlog: %d\n  peak heap alloc: %d bytes\n  peak goroutines: %d\n  drain duration: %s\n  shutdown duration: %s\n  correctness: %s\n  throughput: %s\n  backlog: %s\n  memory: %s\n  goroutines: %s\n  drain: %s\n  overall: %s\n",
 		outputPaths.displayStreamPath,
 		outputPaths.displaySnapshotPath,
+		outputPaths.displayAssessmentPath,
 		snapshot.Runtime,
 		snapshot.SampleInterval,
 		snapshot.Produced,
@@ -472,5 +723,12 @@ func TestSoakSustainedLoadStaysHealthy(t *testing.T) {
 		snapshot.PeakGoroutines,
 		snapshot.DrainDuration,
 		snapshot.ShutdownDuration,
+		assessment.Correctness.Status,
+		assessment.Throughput.Status,
+		assessment.Backlog.Status,
+		assessment.Memory.Status,
+		assessment.Goroutines.Status,
+		assessment.Drain.Status,
+		assessment.Overall.Status,
 	)
 }
