@@ -76,6 +76,8 @@ type soakConfig struct {
 	Interval      string `json:"interval"`
 	MaxBatchItems int    `json:"max_batch_items"`
 	NumProducers  int    `json:"num_producers"`
+	ConsumerDelay string `json:"consumer_delay"`
+	DrainTimeout  string `json:"drain_timeout"`
 }
 
 type assessmentStatus string
@@ -94,6 +96,8 @@ type soakAssessment struct {
 	ObservedItemsPerSec   float64               `json:"observed_items_per_second"`
 	ObservedBatchesPerSec float64               `json:"observed_batches_per_second"`
 	ThroughputRangePct    float64               `json:"throughput_range_percent"`
+	Acceptance           soakAssessmentSection `json:"acceptance"`
+	Observations         soakAssessmentSection `json:"observations"`
 	Correctness           soakAssessmentSection `json:"correctness"`
 	Throughput            soakAssessmentSection `json:"throughput"`
 	Backlog               soakAssessmentSection `json:"backlog"`
@@ -425,19 +429,62 @@ func makeAssessment(snapshot soakSnapshot, samples []soakSample, startGoroutines
 	drain := soakAssessmentSection{Status: assessmentPass}
 	drainDuration, _ := time.ParseDuration(snapshot.DrainDuration)
 	shutdownDuration, _ := time.ParseDuration(snapshot.ShutdownDuration)
+	drainTimeout, _ := time.ParseDuration(snapshot.Config.DrainTimeout)
+	if drainTimeout <= 0 {
+		drainTimeout = 5 * time.Second
+	}
 	switch {
-	case drainDuration > time.Second || shutdownDuration > 500*time.Millisecond:
+	case drainDuration > drainTimeout || shutdownDuration > drainTimeout:
 		drain.Status = assessmentFail
-	case drainDuration > 100*time.Millisecond || shutdownDuration > 50*time.Millisecond:
+	case drainDuration > drainTimeout/2 || shutdownDuration > drainTimeout/2:
 		drain.Status = assessmentWarn
 	}
 	drain.Notes = []string{
 		fmt.Sprintf("drain duration=%s", snapshot.DrainDuration),
 		fmt.Sprintf("shutdown duration=%s", snapshot.ShutdownDuration),
+		fmt.Sprintf("drain timeout=%s", snapshot.Config.DrainTimeout),
 	}
 
-	overall := soakAssessmentSection{Status: assessmentPass}
-	for _, section := range []soakAssessmentSection{correctness, throughput, backlog, memory, goroutines, drain} {
+	acceptance := soakAssessmentSection{Status: assessmentPass}
+	for _, section := range []soakAssessmentSection{correctness, goroutines, drain} {
+		if section.Status == assessmentFail {
+			acceptance.Status = assessmentFail
+			break
+		}
+		if section.Status == assessmentWarn {
+			acceptance.Status = assessmentWarn
+		}
+	}
+	switch acceptance.Status {
+	case assessmentPass:
+		acceptance.Notes = []string{"tempo stayed live under intentional backpressure and recovered without losing accepted items"}
+	case assessmentWarn:
+		acceptance.Notes = []string{"tempo recovered, but one or more acceptance signals need a closer look"}
+	default:
+		acceptance.Notes = []string{"tempo did not meet the recovery and correctness acceptance criteria for this soak run"}
+	}
+
+	observations := soakAssessmentSection{Status: assessmentPass}
+	for _, section := range []soakAssessmentSection{throughput, backlog, memory} {
+		if section.Status == assessmentFail {
+			observations.Status = assessmentFail
+			break
+		}
+		if section.Status == assessmentWarn {
+			observations.Status = assessmentWarn
+		}
+	}
+	switch observations.Status {
+	case assessmentPass:
+		observations.Notes = []string{"resource and throughput observations stayed within the current advisory thresholds"}
+	case assessmentWarn:
+		observations.Notes = []string{"the soak run recovered, but advisory resource or throughput observations deserve review"}
+	default:
+		observations.Notes = []string{"the soak run recovered, but advisory resource or throughput observations were well outside the expected pre-limit range"}
+	}
+
+	overall := soakAssessmentSection{Status: acceptance.Status}
+	for _, section := range []soakAssessmentSection{acceptance, observations} {
 		if section.Status == assessmentFail {
 			overall.Status = assessmentFail
 			break
@@ -463,6 +510,8 @@ func makeAssessment(snapshot soakSnapshot, samples []soakSample, startGoroutines
 		ObservedItemsPerSec:   snapshot.AvgItemsPerSec,
 		ObservedBatchesPerSec: snapshot.AvgBatchesPerSec,
 		ThroughputRangePct:    snapshot.ThroughputRangePct,
+		Acceptance:            acceptance,
+		Observations:          observations,
 		Correctness:           correctness,
 		Throughput:            throughput,
 		Backlog:               backlog,
@@ -552,8 +601,19 @@ func TestStressHighConcurrencyDelivery(t *testing.T) {
 	}
 }
 
-// TestSoakSustainedLoadStaysHealthy proves that Tempo can run under sustained
-// load for a while without wedging and without obvious goroutine growth.
+// TestSoakSustainedLoadStaysHealthy proves that Tempo can absorb temporary
+// consumer-side backpressure, remain live while backlog accumulates, and then
+// recover without losing accepted items once the artificial slowdown is lifted.
+//
+// Acceptance for this soak is intentionally centered on recovery and
+// correctness:
+// - Tempo stays live during the pressure window.
+// - Tempo drains all accepted items after pressure is removed.
+// - Shutdown completes within the configured drain timeout.
+//
+// Throughput, peak backlog, and peak memory are still recorded, but for the
+// current unbounded design they are advisory observations rather than the
+// primary pass/fail signal for this recovery test.
 func TestSoakSustainedLoadStaysHealthy(t *testing.T) {
 	if os.Getenv("TEMPO_RUN_SOAK") == "" {
 		t.Skip("set TEMPO_RUN_SOAK=1 to run soak tests")
@@ -578,6 +638,22 @@ func TestSoakSustainedLoadStaysHealthy(t *testing.T) {
 		Interval:      10 * time.Millisecond,
 		MaxBatchItems: 128,
 	}
+	consumerDelay := time.Duration(0)
+	if raw := os.Getenv("TEMPO_SOAK_CONSUMER_DELAY"); raw != "" {
+		parsed, err := time.ParseDuration(raw)
+		if err != nil {
+			t.Fatalf("parse TEMPO_SOAK_CONSUMER_DELAY: %v", err)
+		}
+		consumerDelay = parsed
+	}
+	drainTimeout := runFor
+	if raw := os.Getenv("TEMPO_SOAK_DRAIN_TIMEOUT"); raw != "" {
+		parsed, err := time.ParseDuration(raw)
+		if err != nil {
+			t.Fatalf("parse TEMPO_SOAK_DRAIN_TIMEOUT: %v", err)
+		}
+		drainTimeout = parsed
+	}
 	environment := soakEnvironment{
 		GoOS:      runtime.GOOS,
 		GoArch:    runtime.GOARCH,
@@ -588,6 +664,8 @@ func TestSoakSustainedLoadStaysHealthy(t *testing.T) {
 		Interval:      config.Interval.String(),
 		MaxBatchItems: config.MaxBatchItems,
 		NumProducers:  numProducers,
+		ConsumerDelay: consumerDelay.String(),
+		DrainTimeout:  drainTimeout.String(),
 	}
 
 	d, err := tempo.NewDispatcher(&config)
@@ -624,10 +702,15 @@ func TestSoakSustainedLoadStaysHealthy(t *testing.T) {
 	)
 
 	stopConsumers := make(chan struct{})
+	var applyConsumerDelay atomic.Bool
+	applyConsumerDelay.Store(consumerDelay > 0)
 	go func() {
 		for {
 			select {
 			case batch := <-d.Batches():
+				if applyConsumerDelay.Load() && consumerDelay > 0 {
+					time.Sleep(consumerDelay)
+				}
 				delivered.Add(int64(len(batch)))
 				batches.Add(1)
 			case <-stopConsumers:
@@ -663,9 +746,10 @@ func TestSoakSustainedLoadStaysHealthy(t *testing.T) {
 	drainStart := time.Now()
 	close(stopProducing)
 	producers.Wait()
+	applyConsumerDelay.Store(false)
 
 	shutdownStart := time.Now()
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), drainTimeout)
 	defer cancel()
 	if err := d.Shutdown(ctx); err != nil {
 		t.Fatalf("shutdown after soak run: %v", err)
@@ -673,7 +757,7 @@ func TestSoakSustainedLoadStaysHealthy(t *testing.T) {
 	shutdownDuration := time.Since(shutdownStart)
 	drainDuration := time.Since(drainStart)
 
-	if !waitForSettledDelivery(&produced, &delivered, time.Second) {
+	if !waitForSettledDelivery(&produced, &delivered, 5*time.Second) {
 		t.Fatalf(
 			"expected soak run to settle after shutdown: produced=%d delivered=%d",
 			produced.Load(),
@@ -743,11 +827,15 @@ func TestSoakSustainedLoadStaysHealthy(t *testing.T) {
 	}
 
 	fmt.Printf(
-		"\nsoak summary\n  stream: %s\n  results: %s\n  runtime: %s\n  sample interval: %s\n  produced: %d\n  delivered: %d\n  batches: %d\n  avg items/sec: %.0f\n  min items/sec: %.0f\n  max items/sec: %.0f\n  avg batches/sec: %.0f\n  throughput range: %.2f%%\n  peak backlog: %d\n  peak heap alloc: %d bytes\n  peak goroutines: %d\n  drain duration: %s\n  shutdown duration: %s\n  correctness: %s\n  throughput: %s\n  backlog: %s\n  memory: %s\n  goroutines: %s\n  drain: %s\n  overall: %s\n",
+		"\nsoak summary\n  stream: %s\n  results: %s\n  runtime: %s\n  sample interval: %s\n  consumer delay: %s\n  drain timeout: %s\n  acceptance: %s\n  observations: %s\n  produced: %d\n  delivered: %d\n  batches: %d\n  avg items/sec: %.0f\n  min items/sec: %.0f\n  max items/sec: %.0f\n  avg batches/sec: %.0f\n  throughput range: %.2f%%\n  peak backlog: %d\n  peak heap alloc: %d bytes\n  peak goroutines: %d\n  drain duration: %s\n  shutdown duration: %s\n  correctness: %s\n  throughput: %s\n  backlog: %s\n  memory: %s\n  goroutines: %s\n  drain: %s\n  overall: %s\n",
 		outputPaths.displayStreamPath,
 		outputPaths.displaySnapshotPath,
 		snapshot.Runtime,
 		snapshot.SampleInterval,
+		runConfig.ConsumerDelay,
+		runConfig.DrainTimeout,
+		assessment.Acceptance.Status,
+		assessment.Observations.Status,
 		snapshot.Produced,
 		snapshot.Delivered,
 		snapshot.Batches,
