@@ -17,5 +17,8 @@ jobs:
         with:
           go-version-file: go.mod
 
+      - name: install tools
+        run: make install
+
       - name: test
-        run: go test ./...
+        run: make test
