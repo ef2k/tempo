@@ -1,13 +1,22 @@
-.PHONY: install test race bench
+.PHONY: install test race bench stress soak
+
+TEST_PACKAGES := $(filter-out github.com/ef2k/tempo/performance,$(shell go list ./...))
 
 install:
 	go install gotest.tools/gotestsum@v1.13.0
 
 test:
-	gotestsum -- ./...
+	gotestsum -- $(TEST_PACKAGES)
 
 race:
-	gotestsum -- -race ./...
+	gotestsum -- -race $(TEST_PACKAGES)
 
 bench:
-	go test -run '^$$' -bench . -benchmem
+	go test ./performance -run '^$$' -bench . -benchmem
+
+stress:
+	TEMPO_RUN_STRESS=1 gotestsum -- -run '^TestStressHighConcurrencyDelivery$$' ./performance
+
+soak: SOAK_DURATION ?= 5m
+soak:
+	TEMPO_RUN_SOAK=1 TEMPO_SOAK_DURATION=$(SOAK_DURATION) gotestsum -- -run '^TestSoakSustainedLoadStaysHealthy$$' ./performance

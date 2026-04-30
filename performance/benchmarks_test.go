@@ -1,4 +1,4 @@
-package tempo
+package performance
 
 import (
 	"context"
@@ -6,6 +6,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	tempo "github.com/ef2k/tempo"
 )
 
 type benchEvent struct {
@@ -22,10 +24,10 @@ type benchDrainOptions struct {
 	consumerDelay time.Duration
 }
 
-func newBenchDispatcher(b *testing.B, c *Config, opts benchDrainOptions) (*Dispatcher, chan struct{}, *atomic.Int64, *atomic.Int64) {
+func newBenchDispatcher(b *testing.B, c *tempo.Config, opts benchDrainOptions) (*tempo.Dispatcher, chan struct{}, *atomic.Int64, *atomic.Int64) {
 	b.Helper()
 
-	d, err := NewDispatcher(c)
+	d, err := tempo.NewDispatcher(c)
 	if err != nil {
 		b.Fatalf("new dispatcher: %v", err)
 	}
@@ -73,7 +75,7 @@ func waitForDelivered(b *testing.B, delivered *atomic.Int64, expected int64, tim
 	b.Fatalf("timed out waiting for delivered items: got %d want %d", delivered.Load(), expected)
 }
 
-func shutdownBenchDispatcher(b *testing.B, d *Dispatcher, timeout time.Duration) {
+func shutdownBenchDispatcher(b *testing.B, d *tempo.Dispatcher, timeout time.Duration) {
 	b.Helper()
 
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
@@ -112,7 +114,7 @@ func slowConsumerDrainTimeout(n int, maxBatchItems int, delay time.Duration) tim
 // BenchmarkEnqueueSingleProducer measures the basic single-producer size-driven
 // path without contention.
 func BenchmarkEnqueueSingleProducer(b *testing.B) {
-	d, _, delivered, batches := newBenchDispatcher(b, &Config{
+	d, _, delivered, batches := newBenchDispatcher(b, &tempo.Config{
 		Interval:      time.Hour,
 		MaxBatchItems: 256,
 	}, benchDrainOptions{})
@@ -135,7 +137,7 @@ func BenchmarkEnqueueSingleProducer(b *testing.B) {
 // BenchmarkSustainedParallelFlush256 measures steady parallel producer
 // throughput when batching is mostly driven by max batch size.
 func BenchmarkSustainedParallelFlush256(b *testing.B) {
-	d, _, delivered, batches := newBenchDispatcher(b, &Config{
+	d, _, delivered, batches := newBenchDispatcher(b, &tempo.Config{
 		Interval:      time.Hour,
 		MaxBatchItems: 256,
 	}, benchDrainOptions{})
@@ -163,7 +165,7 @@ func BenchmarkSustainedParallelFlush256(b *testing.B) {
 // BenchmarkBurstParallelFlush64 measures bursty parallel producers hitting
 // smaller size-based flushes more often.
 func BenchmarkBurstParallelFlush64(b *testing.B) {
-	d, _, delivered, batches := newBenchDispatcher(b, &Config{
+	d, _, delivered, batches := newBenchDispatcher(b, &tempo.Config{
 		Interval:      time.Hour,
 		MaxBatchItems: 64,
 	}, benchDrainOptions{})
@@ -192,7 +194,7 @@ func BenchmarkBurstParallelFlush64(b *testing.B) {
 // BenchmarkBatchDeliverySmallBatch measures throughput when Tempo emits many
 // small batches instead of larger grouped flushes.
 func BenchmarkBatchDeliverySmallBatch(b *testing.B) {
-	d, _, delivered, batches := newBenchDispatcher(b, &Config{
+	d, _, delivered, batches := newBenchDispatcher(b, &tempo.Config{
 		Interval:      time.Hour,
 		MaxBatchItems: 8,
 	}, benchDrainOptions{})
@@ -215,7 +217,7 @@ func BenchmarkBatchDeliverySmallBatch(b *testing.B) {
 // BenchmarkParallelLargePayload measures how larger item size affects parallel
 // producer throughput.
 func BenchmarkParallelLargePayload(b *testing.B) {
-	d, _, delivered, batches := newBenchDispatcher(b, &Config{
+	d, _, delivered, batches := newBenchDispatcher(b, &tempo.Config{
 		Interval:      time.Hour,
 		MaxBatchItems: 256,
 	}, benchDrainOptions{})
@@ -243,7 +245,7 @@ func BenchmarkParallelLargePayload(b *testing.B) {
 // BenchmarkSlowConsumerBackpressure measures producer throughput when batch
 // delivery is intentionally slowed down.
 func BenchmarkSlowConsumerBackpressure(b *testing.B) {
-	d, _, delivered, batches := newBenchDispatcher(b, &Config{
+	d, _, delivered, batches := newBenchDispatcher(b, &tempo.Config{
 		Interval:      time.Hour,
 		MaxBatchItems: 64,
 	}, benchDrainOptions{
@@ -273,7 +275,7 @@ func BenchmarkSlowConsumerBackpressure(b *testing.B) {
 // BenchmarkIntervalDrivenBatching measures the timer-driven path where flushes
 // happen on the interval instead of max batch size.
 func BenchmarkIntervalDrivenBatching(b *testing.B) {
-	d, _, delivered, batches := newBenchDispatcher(b, &Config{
+	d, _, delivered, batches := newBenchDispatcher(b, &tempo.Config{
 		Interval:      200 * time.Microsecond,
 		MaxBatchItems: b.N + 1,
 	}, benchDrainOptions{})
@@ -299,7 +301,7 @@ func BenchmarkIntervalDrivenBatching(b *testing.B) {
 func BenchmarkBatchSizeSweep(b *testing.B) {
 	for _, size := range []int{8, 32, 128, 512, 1024} {
 		b.Run("max_batch_items="+itoa(size), func(b *testing.B) {
-			d, _, delivered, batches := newBenchDispatcher(b, &Config{
+			d, _, delivered, batches := newBenchDispatcher(b, &tempo.Config{
 				Interval:      time.Hour,
 				MaxBatchItems: size,
 			}, benchDrainOptions{})
@@ -331,7 +333,7 @@ func BenchmarkBatchSizeSweep(b *testing.B) {
 func BenchmarkProducerCountSweep(b *testing.B) {
 	for _, parallelism := range []int{1, 4, 16, 64, 256} {
 		b.Run("parallelism="+itoa(parallelism), func(b *testing.B) {
-			d, _, delivered, batches := newBenchDispatcher(b, &Config{
+			d, _, delivered, batches := newBenchDispatcher(b, &tempo.Config{
 				Interval:      time.Hour,
 				MaxBatchItems: 256,
 			}, benchDrainOptions{})
@@ -369,7 +371,7 @@ func BenchmarkIntervalSweep(b *testing.B) {
 		100 * time.Millisecond,
 	} {
 		b.Run("interval="+interval.String(), func(b *testing.B) {
-			d, _, delivered, batches := newBenchDispatcher(b, &Config{
+			d, _, delivered, batches := newBenchDispatcher(b, &tempo.Config{
 				Interval:      interval,
 				MaxBatchItems: b.N + 1,
 			}, benchDrainOptions{})
@@ -402,7 +404,7 @@ func BenchmarkSlowConsumerSweep(b *testing.B) {
 		time.Millisecond,
 	} {
 		b.Run("consumer_delay="+delay.String(), func(b *testing.B) {
-			d, _, delivered, batches := newBenchDispatcher(b, &Config{
+			d, _, delivered, batches := newBenchDispatcher(b, &tempo.Config{
 				Interval:      time.Hour,
 				MaxBatchItems: maxBatchItems,
 			}, benchDrainOptions{
