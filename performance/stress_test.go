@@ -26,46 +26,54 @@ import (
 // slower problems like wedges, unexpected memory spikes, or goroutine buildup.
 
 type soakSample struct {
-	ElapsedSeconds float64 `json:"elapsed_seconds"`
-	Produced       int64   `json:"produced"`
-	Rejected       int64   `json:"rejected"`
-	Delivered      int64   `json:"delivered"`
-	Batches        int64   `json:"batches"`
-	Backlog        int64   `json:"backlog"`
-	ItemsPerSecond float64 `json:"items_per_second"`
-	BatchesPerSec  float64 `json:"batches_per_second"`
-	HeapAllocBytes uint64  `json:"heap_alloc_bytes"`
-	HeapObjects    uint64  `json:"heap_objects"`
-	Goroutines     int     `json:"goroutines"`
-	GCCycles       uint32  `json:"gc_cycles"`
+	ElapsedSeconds         float64 `json:"elapsed_seconds"`
+	Produced               int64   `json:"produced"`
+	Rejected               int64   `json:"rejected"`
+	Delivered              int64   `json:"delivered"`
+	Batches                int64   `json:"batches"`
+	Backlog                int64   `json:"backlog"`
+	AcceptedItemsPerSecond float64 `json:"accepted_items_per_second"`
+	DeliveredItemsPerSec   float64 `json:"delivered_items_per_second"`
+	RejectedItemsPerSecond float64 `json:"rejected_items_per_second"`
+	BatchesPerSec          float64 `json:"batches_per_second"`
+	HeapAllocBytes         uint64  `json:"heap_alloc_bytes"`
+	HeapObjects            uint64  `json:"heap_objects"`
+	Goroutines             int     `json:"goroutines"`
+	GCCycles               uint32  `json:"gc_cycles"`
 }
 
 type soakSnapshot struct {
-	StartedAt          time.Time       `json:"started_at"`
-	Runtime            string          `json:"runtime"`
-	SampleInterval     string          `json:"sample_interval"`
-	Environment        soakEnvironment `json:"environment"`
-	Config             soakConfig      `json:"config"`
-	Produced           int64           `json:"produced"`
-	Rejected           int64           `json:"rejected"`
-	Delivered          int64           `json:"delivered"`
-	Batches            int64           `json:"batches"`
-	AvgItemsPerSec     float64         `json:"avg_items_per_second"`
-	MinItemsPerSec     float64         `json:"min_items_per_second"`
-	MaxItemsPerSec     float64         `json:"max_items_per_second"`
-	AvgBatchesPerSec   float64         `json:"avg_batches_per_second"`
-	MinBatchesPerSec   float64         `json:"min_batches_per_second"`
-	MaxBatchesPerSec   float64         `json:"max_batches_per_second"`
-	ThroughputRangePct float64         `json:"throughput_range_percent"`
-	FinalBacklog       int64           `json:"final_backlog"`
-	PeakBacklog        int64           `json:"peak_backlog"`
-	PeakHeapAllocBytes uint64          `json:"peak_heap_alloc_bytes"`
-	FinalHeapAlloc     uint64          `json:"final_heap_alloc_bytes"`
-	PeakGoroutines     int             `json:"peak_goroutines"`
-	FinalGoroutines    int             `json:"final_goroutines"`
-	DrainDuration      string          `json:"drain_duration"`
-	ShutdownDuration   string          `json:"shutdown_duration"`
-	Assessment         soakAssessment  `json:"assessment"`
+	StartedAt               time.Time       `json:"started_at"`
+	Runtime                 string          `json:"runtime"`
+	SampleInterval          string          `json:"sample_interval"`
+	Environment             soakEnvironment `json:"environment"`
+	Config                  soakConfig      `json:"config"`
+	Produced                int64           `json:"produced"`
+	Rejected                int64           `json:"rejected"`
+	Delivered               int64           `json:"delivered"`
+	Batches                 int64           `json:"batches"`
+	AvgAcceptedItemsPerSec  float64         `json:"avg_accepted_items_per_second"`
+	MinAcceptedItemsPerSec  float64         `json:"min_accepted_items_per_second"`
+	MaxAcceptedItemsPerSec  float64         `json:"max_accepted_items_per_second"`
+	AvgDeliveredItemsPerSec float64         `json:"avg_delivered_items_per_second"`
+	MinDeliveredItemsPerSec float64         `json:"min_delivered_items_per_second"`
+	MaxDeliveredItemsPerSec float64         `json:"max_delivered_items_per_second"`
+	AvgRejectedItemsPerSec  float64         `json:"avg_rejected_items_per_second"`
+	MinRejectedItemsPerSec  float64         `json:"min_rejected_items_per_second"`
+	MaxRejectedItemsPerSec  float64         `json:"max_rejected_items_per_second"`
+	AvgBatchesPerSec        float64         `json:"avg_batches_per_second"`
+	MinBatchesPerSec        float64         `json:"min_batches_per_second"`
+	MaxBatchesPerSec        float64         `json:"max_batches_per_second"`
+	ThroughputRangePct      float64         `json:"delivered_throughput_range_percent"`
+	FinalBacklog            int64           `json:"final_backlog"`
+	PeakBacklog             int64           `json:"peak_backlog"`
+	PeakHeapAllocBytes      uint64          `json:"peak_heap_alloc_bytes"`
+	FinalHeapAlloc          uint64          `json:"final_heap_alloc_bytes"`
+	PeakGoroutines          int             `json:"peak_goroutines"`
+	FinalGoroutines         int             `json:"final_goroutines"`
+	DrainDuration           string          `json:"drain_duration"`
+	ShutdownDuration        string          `json:"shutdown_duration"`
+	Assessment              soakAssessment  `json:"assessment"`
 }
 
 type soakEnvironment struct {
@@ -93,22 +101,24 @@ const (
 )
 
 type soakAssessment struct {
-	StartedAt             time.Time             `json:"started_at"`
-	Runtime               string                `json:"runtime"`
-	StreamPath            string                `json:"stream_path"`
-	ResultsPath           string                `json:"results_path"`
-	ObservedItemsPerSec   float64               `json:"observed_items_per_second"`
-	ObservedBatchesPerSec float64               `json:"observed_batches_per_second"`
-	ThroughputRangePct    float64               `json:"throughput_range_percent"`
-	Acceptance            soakAssessmentSection `json:"acceptance"`
-	Observations          soakAssessmentSection `json:"observations"`
-	Correctness           soakAssessmentSection `json:"correctness"`
-	Throughput            soakAssessmentSection `json:"throughput"`
-	Backlog               soakAssessmentSection `json:"backlog"`
-	Memory                soakAssessmentSection `json:"memory"`
-	Goroutines            soakAssessmentSection `json:"goroutines"`
-	Drain                 soakAssessmentSection `json:"drain"`
-	Overall               soakAssessmentSection `json:"overall"`
+	StartedAt                    time.Time             `json:"started_at"`
+	Runtime                      string                `json:"runtime"`
+	StreamPath                   string                `json:"stream_path"`
+	ResultsPath                  string                `json:"results_path"`
+	ObservedAcceptedItemsPerSec  float64               `json:"observed_accepted_items_per_second"`
+	ObservedDeliveredItemsPerSec float64               `json:"observed_delivered_items_per_second"`
+	ObservedRejectedItemsPerSec  float64               `json:"observed_rejected_items_per_second"`
+	ObservedBatchesPerSec        float64               `json:"observed_batches_per_second"`
+	ThroughputRangePct           float64               `json:"delivered_throughput_range_percent"`
+	Acceptance                   soakAssessmentSection `json:"acceptance"`
+	Observations                 soakAssessmentSection `json:"observations"`
+	Correctness                  soakAssessmentSection `json:"correctness"`
+	Throughput                   soakAssessmentSection `json:"throughput"`
+	Backlog                      soakAssessmentSection `json:"backlog"`
+	Memory                       soakAssessmentSection `json:"memory"`
+	Goroutines                   soakAssessmentSection `json:"goroutines"`
+	Drain                        soakAssessmentSection `json:"drain"`
+	Overall                      soakAssessmentSection `json:"overall"`
 }
 
 type soakAssessmentSection struct {
@@ -189,8 +199,7 @@ func startSoakCollector(
 	sampleEvery time.Duration,
 	environment soakEnvironment,
 	config soakConfig,
-	produced, delivered, batches *atomic.Int64,
-	rejected *atomic.Int64,
+	produced, rejected, delivered, batches *atomic.Int64,
 	streamPath string,
 ) (chan struct{}, chan soakCollection, error) {
 	streamFile, err := os.Create(streamPath)
@@ -225,11 +234,13 @@ func startSoakCollector(
 		}
 
 		var (
-			collection   soakCollection
-			prevProduced int64
-			prevBatches  int64
-			prevSampleAt = startedAt
-			recordSample = func(now time.Time) {
+			collection    soakCollection
+			prevProduced  int64
+			prevRejected  int64
+			prevDelivered int64
+			prevBatches   int64
+			prevSampleAt  = startedAt
+			recordSample  = func(now time.Time) {
 				currentProduced := produced.Load()
 				currentRejected := rejected.Load()
 				currentDelivered := delivered.Load()
@@ -251,26 +262,32 @@ func startSoakCollector(
 				}
 
 				elapsed := now.Sub(prevSampleAt).Seconds()
-				itemsPerSecond := 0.0
+				acceptedItemsPerSecond := 0.0
+				deliveredItemsPerSecond := 0.0
+				rejectedItemsPerSecond := 0.0
 				batchesPerSecond := 0.0
 				if elapsed > 0 {
-					itemsPerSecond = float64(currentProduced-prevProduced) / elapsed
+					acceptedItemsPerSecond = float64(currentProduced-prevProduced) / elapsed
+					deliveredItemsPerSecond = float64(currentDelivered-prevDelivered) / elapsed
+					rejectedItemsPerSecond = float64(currentRejected-prevRejected) / elapsed
 					batchesPerSecond = float64(currentBatches-prevBatches) / elapsed
 				}
 
 				sample := soakSample{
-					ElapsedSeconds: now.Sub(startedAt).Seconds(),
-					Produced:       currentProduced,
-					Rejected:       currentRejected,
-					Delivered:      currentDelivered,
-					Batches:        currentBatches,
-					Backlog:        backlog,
-					ItemsPerSecond: itemsPerSecond,
-					BatchesPerSec:  batchesPerSecond,
-					HeapAllocBytes: mem.HeapAlloc,
-					HeapObjects:    mem.HeapObjects,
-					Goroutines:     goroutines,
-					GCCycles:       mem.NumGC,
+					ElapsedSeconds:         now.Sub(startedAt).Seconds(),
+					Produced:               currentProduced,
+					Rejected:               currentRejected,
+					Delivered:              currentDelivered,
+					Batches:                currentBatches,
+					Backlog:                backlog,
+					AcceptedItemsPerSecond: acceptedItemsPerSecond,
+					DeliveredItemsPerSec:   deliveredItemsPerSecond,
+					RejectedItemsPerSecond: rejectedItemsPerSecond,
+					BatchesPerSec:          batchesPerSecond,
+					HeapAllocBytes:         mem.HeapAlloc,
+					HeapObjects:            mem.HeapObjects,
+					Goroutines:             goroutines,
+					GCCycles:               mem.NumGC,
 				}
 
 				collection.samples = append(collection.samples, sample)
@@ -283,6 +300,8 @@ func startSoakCollector(
 				}
 
 				prevProduced = currentProduced
+				prevRejected = currentRejected
+				prevDelivered = currentDelivered
 				prevBatches = currentBatches
 				prevSampleAt = now
 			}
@@ -324,33 +343,49 @@ func activeSoakSamples(samples []soakSample) []soakSample {
 	return samples[:len(samples)-1]
 }
 
-func throughputStats(samples []soakSample) (avgItems, avgBatches, minItems, maxItems, minBatches, maxBatches float64) {
+func floatStats(values []float64) (avg, min, max float64) {
+	if len(values) == 0 {
+		return 0, 0, 0
+	}
+	min = values[0]
+	max = values[0]
+	for _, v := range values {
+		avg += v
+		if v < min {
+			min = v
+		}
+		if v > max {
+			max = v
+		}
+	}
+	avg /= float64(len(values))
+	return avg, min, max
+}
+
+func throughputStats(samples []soakSample) (
+	avgAccepted, minAccepted, maxAccepted float64,
+	avgDelivered, minDelivered, maxDelivered float64,
+	avgRejected, minRejected, maxRejected float64,
+	avgBatches, minBatches, maxBatches float64,
+) {
 	if len(samples) == 0 {
-		return 0, 0, 0, 0, 0, 0
+		return 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
 	}
-	minItems = samples[0].ItemsPerSecond
-	maxItems = samples[0].ItemsPerSecond
-	minBatches = samples[0].BatchesPerSec
-	maxBatches = samples[0].BatchesPerSec
+	accepted := make([]float64, 0, len(samples))
+	delivered := make([]float64, 0, len(samples))
+	rejected := make([]float64, 0, len(samples))
+	batches := make([]float64, 0, len(samples))
 	for _, sample := range samples {
-		avgItems += sample.ItemsPerSecond
-		avgBatches += sample.BatchesPerSec
-		if sample.ItemsPerSecond < minItems {
-			minItems = sample.ItemsPerSecond
-		}
-		if sample.ItemsPerSecond > maxItems {
-			maxItems = sample.ItemsPerSecond
-		}
-		if sample.BatchesPerSec < minBatches {
-			minBatches = sample.BatchesPerSec
-		}
-		if sample.BatchesPerSec > maxBatches {
-			maxBatches = sample.BatchesPerSec
-		}
+		accepted = append(accepted, sample.AcceptedItemsPerSecond)
+		delivered = append(delivered, sample.DeliveredItemsPerSec)
+		rejected = append(rejected, sample.RejectedItemsPerSecond)
+		batches = append(batches, sample.BatchesPerSec)
 	}
-	avgItems /= float64(len(samples))
-	avgBatches /= float64(len(samples))
-	return avgItems, avgBatches, minItems, maxItems, minBatches, maxBatches
+	avgAccepted, minAccepted, maxAccepted = floatStats(accepted)
+	avgDelivered, minDelivered, maxDelivered = floatStats(delivered)
+	avgRejected, minRejected, maxRejected = floatStats(rejected)
+	avgBatches, minBatches, maxBatches = floatStats(batches)
+	return avgAccepted, minAccepted, maxAccepted, avgDelivered, minDelivered, maxDelivered, avgRejected, minRejected, maxRejected, avgBatches, minBatches, maxBatches
 }
 
 func heapRecovered(samples []soakSample, peak uint64) bool {
@@ -378,7 +413,7 @@ func makeAssessment(snapshot soakSnapshot, samples []soakSample, startGoroutines
 
 	throughput := soakAssessmentSection{Status: assessmentPass}
 	switch {
-	case snapshot.AvgItemsPerSec == 0:
+	case snapshot.AvgDeliveredItemsPerSec == 0:
 		throughput.Status = assessmentFail
 	case snapshot.ThroughputRangePct > 25:
 		throughput.Status = assessmentFail
@@ -386,9 +421,11 @@ func makeAssessment(snapshot soakSnapshot, samples []soakSample, startGoroutines
 		throughput.Status = assessmentWarn
 	}
 	throughput.Notes = []string{
-		fmt.Sprintf("avg items/sec=%.0f", snapshot.AvgItemsPerSec),
+		fmt.Sprintf("avg accepted items/sec=%.0f", snapshot.AvgAcceptedItemsPerSec),
+		fmt.Sprintf("avg delivered items/sec=%.0f", snapshot.AvgDeliveredItemsPerSec),
+		fmt.Sprintf("avg rejected items/sec=%.0f", snapshot.AvgRejectedItemsPerSec),
 		fmt.Sprintf("avg batches/sec=%.0f", snapshot.AvgBatchesPerSec),
-		fmt.Sprintf("throughput range=%.2f%%", snapshot.ThroughputRangePct),
+		fmt.Sprintf("delivered throughput range=%.2f%%", snapshot.ThroughputRangePct),
 	}
 
 	backlog := soakAssessmentSection{Status: assessmentPass}
@@ -510,22 +547,24 @@ func makeAssessment(snapshot soakSnapshot, samples []soakSample, startGoroutines
 	}
 
 	return soakAssessment{
-		StartedAt:             snapshot.StartedAt,
-		Runtime:               snapshot.Runtime,
-		StreamPath:            outputPaths.displayStreamPath,
-		ResultsPath:           outputPaths.displaySnapshotPath,
-		ObservedItemsPerSec:   snapshot.AvgItemsPerSec,
-		ObservedBatchesPerSec: snapshot.AvgBatchesPerSec,
-		ThroughputRangePct:    snapshot.ThroughputRangePct,
-		Acceptance:            acceptance,
-		Observations:          observations,
-		Correctness:           correctness,
-		Throughput:            throughput,
-		Backlog:               backlog,
-		Memory:                memory,
-		Goroutines:            goroutines,
-		Drain:                 drain,
-		Overall:               overall,
+		StartedAt:                    snapshot.StartedAt,
+		Runtime:                      snapshot.Runtime,
+		StreamPath:                   outputPaths.displayStreamPath,
+		ResultsPath:                  outputPaths.displaySnapshotPath,
+		ObservedAcceptedItemsPerSec:  snapshot.AvgAcceptedItemsPerSec,
+		ObservedDeliveredItemsPerSec: snapshot.AvgDeliveredItemsPerSec,
+		ObservedRejectedItemsPerSec:  snapshot.AvgRejectedItemsPerSec,
+		ObservedBatchesPerSec:        snapshot.AvgBatchesPerSec,
+		ThroughputRangePct:           snapshot.ThroughputRangePct,
+		Acceptance:                   acceptance,
+		Observations:                 observations,
+		Correctness:                  correctness,
+		Throughput:                   throughput,
+		Backlog:                      backlog,
+		Memory:                       memory,
+		Goroutines:                   goroutines,
+		Drain:                        drain,
+		Overall:                      overall,
 	}
 }
 
@@ -799,10 +838,10 @@ func TestSoakSustainedLoadStaysHealthy(t *testing.T) {
 	totalDelivered := delivered.Load()
 	finalBacklog := totalProduced - totalDelivered
 	active := activeSoakSamples(collection.samples)
-	avgItems, avgBatches, minItems, maxItems, minBatches, maxBatches := throughputStats(active)
+	avgAccepted, minAccepted, maxAccepted, avgDelivered, minDelivered, maxDelivered, avgRejected, minRejected, maxRejected, avgBatches, minBatches, maxBatches := throughputStats(active)
 	rangePct := 0.0
-	if avgItems > 0 {
-		rangePct = ((maxItems - minItems) / avgItems) * 100
+	if avgDelivered > 0 {
+		rangePct = ((maxDelivered - minDelivered) / avgDelivered) * 100
 	}
 
 	if totalDelivered == 0 {
@@ -818,30 +857,36 @@ func TestSoakSustainedLoadStaysHealthy(t *testing.T) {
 	}
 
 	snapshot := soakSnapshot{
-		StartedAt:          startedAt,
-		Runtime:            runFor.String(),
-		SampleInterval:     sampleEvery.String(),
-		Environment:        environment,
-		Config:             runConfig,
-		Produced:           totalProduced,
-		Rejected:           totalRejected,
-		Delivered:          totalDelivered,
-		Batches:            batches.Load(),
-		AvgItemsPerSec:     avgItems,
-		MinItemsPerSec:     minItems,
-		MaxItemsPerSec:     maxItems,
-		AvgBatchesPerSec:   avgBatches,
-		MinBatchesPerSec:   minBatches,
-		MaxBatchesPerSec:   maxBatches,
-		ThroughputRangePct: rangePct,
-		FinalBacklog:       finalBacklog,
-		PeakBacklog:        collection.peakBacklog,
-		PeakHeapAllocBytes: collection.peakHeapAllocBytes,
-		FinalHeapAlloc:     collection.samples[len(collection.samples)-1].HeapAllocBytes,
-		PeakGoroutines:     collection.peakGoroutines,
-		FinalGoroutines:    endGoroutines,
-		DrainDuration:      drainDuration.String(),
-		ShutdownDuration:   shutdownDuration.String(),
+		StartedAt:               startedAt,
+		Runtime:                 runFor.String(),
+		SampleInterval:          sampleEvery.String(),
+		Environment:             environment,
+		Config:                  runConfig,
+		Produced:                totalProduced,
+		Rejected:                totalRejected,
+		Delivered:               totalDelivered,
+		Batches:                 batches.Load(),
+		AvgAcceptedItemsPerSec:  avgAccepted,
+		MinAcceptedItemsPerSec:  minAccepted,
+		MaxAcceptedItemsPerSec:  maxAccepted,
+		AvgDeliveredItemsPerSec: avgDelivered,
+		MinDeliveredItemsPerSec: minDelivered,
+		MaxDeliveredItemsPerSec: maxDelivered,
+		AvgRejectedItemsPerSec:  avgRejected,
+		MinRejectedItemsPerSec:  minRejected,
+		MaxRejectedItemsPerSec:  maxRejected,
+		AvgBatchesPerSec:        avgBatches,
+		MinBatchesPerSec:        minBatches,
+		MaxBatchesPerSec:        maxBatches,
+		ThroughputRangePct:      rangePct,
+		FinalBacklog:            finalBacklog,
+		PeakBacklog:             collection.peakBacklog,
+		PeakHeapAllocBytes:      collection.peakHeapAllocBytes,
+		FinalHeapAlloc:          collection.samples[len(collection.samples)-1].HeapAllocBytes,
+		PeakGoroutines:          collection.peakGoroutines,
+		FinalGoroutines:         endGoroutines,
+		DrainDuration:           drainDuration.String(),
+		ShutdownDuration:        shutdownDuration.String(),
 	}
 
 	assessment := makeAssessment(snapshot, collection.samples, startGoroutines, outputPaths)
@@ -851,7 +896,7 @@ func TestSoakSustainedLoadStaysHealthy(t *testing.T) {
 	}
 
 	fmt.Printf(
-		"\nsoak summary\n  stream: %s\n  results: %s\n  runtime: %s\n  sample interval: %s\n  consumer delay: %s\n  drain timeout: %s\n  acceptance: %s\n  observations: %s\n  produced: %d\n  rejected: %d\n  delivered: %d\n  batches: %d\n  avg items/sec: %.0f\n  min items/sec: %.0f\n  max items/sec: %.0f\n  avg batches/sec: %.0f\n  throughput range: %.2f%%\n  peak backlog: %d\n  peak heap alloc: %d bytes\n  peak goroutines: %d\n  drain duration: %s\n  shutdown duration: %s\n  correctness: %s\n  throughput: %s\n  backlog: %s\n  memory: %s\n  goroutines: %s\n  drain: %s\n  overall: %s\n",
+		"\nsoak summary\n  stream: %s\n  results: %s\n  runtime: %s\n  sample interval: %s\n  consumer delay: %s\n  drain timeout: %s\n  acceptance: %s\n  observations: %s\n  produced: %d\n  rejected: %d\n  delivered: %d\n  batches: %d\n  avg accepted items/sec: %.0f\n  min accepted items/sec: %.0f\n  max accepted items/sec: %.0f\n  avg delivered items/sec: %.0f\n  min delivered items/sec: %.0f\n  max delivered items/sec: %.0f\n  avg rejected items/sec: %.0f\n  min rejected items/sec: %.0f\n  max rejected items/sec: %.0f\n  avg batches/sec: %.0f\n  delivered throughput range: %.2f%%\n  peak backlog: %d\n  peak heap alloc: %d bytes\n  peak goroutines: %d\n  drain duration: %s\n  shutdown duration: %s\n  correctness: %s\n  throughput: %s\n  backlog: %s\n  memory: %s\n  goroutines: %s\n  drain: %s\n  overall: %s\n",
 		outputPaths.displayStreamPath,
 		outputPaths.displaySnapshotPath,
 		snapshot.Runtime,
@@ -864,9 +909,15 @@ func TestSoakSustainedLoadStaysHealthy(t *testing.T) {
 		snapshot.Rejected,
 		snapshot.Delivered,
 		snapshot.Batches,
-		snapshot.AvgItemsPerSec,
-		snapshot.MinItemsPerSec,
-		snapshot.MaxItemsPerSec,
+		snapshot.AvgAcceptedItemsPerSec,
+		snapshot.MinAcceptedItemsPerSec,
+		snapshot.MaxAcceptedItemsPerSec,
+		snapshot.AvgDeliveredItemsPerSec,
+		snapshot.MinDeliveredItemsPerSec,
+		snapshot.MaxDeliveredItemsPerSec,
+		snapshot.AvgRejectedItemsPerSec,
+		snapshot.MinRejectedItemsPerSec,
+		snapshot.MaxRejectedItemsPerSec,
 		snapshot.AvgBatchesPerSec,
 		snapshot.ThroughputRangePct,
 		snapshot.PeakBacklog,
