@@ -85,8 +85,8 @@ type soakEnvironment struct {
 
 type soakConfig struct {
 	Interval        string `json:"interval"`
-	MaxBatchItems   int    `json:"max_batch_items"`
-	MaxPendingItems int    `json:"max_pending_items"`
+	MaxBatchBytes   int64  `json:"max_batch_bytes"`
+	MaxPendingBytes int64  `json:"max_pending_bytes"`
 	NumProducers    int    `json:"num_producers"`
 	ConsumerDelay   string `json:"consumer_delay"`
 	DrainTimeout    string `json:"drain_timeout"`
@@ -429,15 +429,19 @@ func makeAssessment(snapshot soakSnapshot, samples []soakSample, startGoroutines
 	}
 
 	backlog := soakAssessmentSection{Status: assessmentPass}
+	backlogWarnThreshold := snapshot.Config.MaxPendingBytes / benchPayloadBytes()
+	if backlogWarnThreshold < 1 {
+		backlogWarnThreshold = 1
+	}
 	switch {
 	case snapshot.FinalBacklog != 0:
 		backlog.Status = assessmentFail
-	case snapshot.PeakBacklog > int64(snapshot.Config.MaxBatchItems*2):
+	case snapshot.PeakBacklog > backlogWarnThreshold:
 		backlog.Status = assessmentWarn
 	}
 	backlog.Notes = []string{
 		fmt.Sprintf("peak backlog=%d", snapshot.PeakBacklog),
-		fmt.Sprintf("max batch items=%d", snapshot.Config.MaxBatchItems),
+		fmt.Sprintf("max pending bytes=%d", snapshot.Config.MaxPendingBytes),
 	}
 
 	memory := soakAssessmentSection{Status: assessmentPass}
@@ -587,8 +591,9 @@ func TestStressHighConcurrencyDelivery(t *testing.T) {
 	}
 
 	d, err := tempo.NewDispatcher(&tempo.Config{
-		Interval:      time.Hour,
-		MaxBatchItems: 256,
+		Interval:        time.Hour,
+		MaxBatchBytes:   256 * benchPayloadBytes(),
+		MaxPendingBytes: 1 * tempo.GiB,
 	})
 	if err != nil {
 		t.Fatalf("new dispatcher: %v", err)
@@ -608,7 +613,7 @@ func TestStressHighConcurrencyDelivery(t *testing.T) {
 		go func(producerID int) {
 			defer produced.Done()
 			for j := 0; j < itemsPerProducer; j++ {
-				if err := d.Enqueue(benchEvent{id: producerID*itemsPerProducer + j, data: "stress"}); err != nil {
+				if err := d.Enqueue(benchEventPayload(producerID*itemsPerProducer + j)); err != nil {
 					t.Errorf("enqueue failed: %v", err)
 					return
 				}
@@ -681,15 +686,16 @@ func TestSoakSustainedLoadStaysHealthy(t *testing.T) {
 
 	const numProducers = 32
 	config := tempo.Config{
-		Interval:      10 * time.Millisecond,
-		MaxBatchItems: 128,
+		Interval:        10 * time.Millisecond,
+		MaxBatchBytes:   128 * benchPayloadBytes(),
+		MaxPendingBytes: 64 * tempo.MiB,
 	}
-	if raw := os.Getenv("TEMPO_SOAK_MAX_PENDING_ITEMS"); raw != "" {
-		parsed, err := strconv.Atoi(raw)
+	if raw := os.Getenv("TEMPO_SOAK_MAX_PENDING_BYTES"); raw != "" {
+		parsed, err := strconv.ParseInt(raw, 10, 64)
 		if err != nil {
-			t.Fatalf("parse TEMPO_SOAK_MAX_PENDING_ITEMS: %v", err)
+			t.Fatalf("parse TEMPO_SOAK_MAX_PENDING_BYTES: %v", err)
 		}
-		config.MaxPendingItems = parsed
+		config.MaxPendingBytes = parsed
 	}
 	consumerDelay := time.Duration(0)
 	if raw := os.Getenv("TEMPO_SOAK_CONSUMER_DELAY"); raw != "" {
@@ -715,8 +721,8 @@ func TestSoakSustainedLoadStaysHealthy(t *testing.T) {
 	}
 	runConfig := soakConfig{
 		Interval:        config.Interval.String(),
-		MaxBatchItems:   config.MaxBatchItems,
-		MaxPendingItems: config.MaxPendingItems,
+		MaxBatchBytes:   config.MaxBatchBytes,
+		MaxPendingBytes: config.MaxPendingBytes,
 		NumProducers:    numProducers,
 		ConsumerDelay:   consumerDelay.String(),
 		DrainTimeout:    drainTimeout.String(),
@@ -788,7 +794,7 @@ func TestSoakSustainedLoadStaysHealthy(t *testing.T) {
 				case <-stopProducing:
 					return
 				default:
-					if err := d.Enqueue(benchEvent{id: producerID<<20 | seq, data: "soak"}); err != nil {
+					if err := d.Enqueue(benchEventPayload(producerID<<20 | seq)); err != nil {
 						if err == tempo.ErrQueueFull {
 							rejected.Add(1)
 							time.Sleep(100 * time.Microsecond)

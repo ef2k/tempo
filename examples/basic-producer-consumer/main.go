@@ -2,7 +2,7 @@ package main
 
 import (
 	"context"
-	"fmt"
+	"encoding/json"
 	"log"
 	"time"
 
@@ -10,8 +10,8 @@ import (
 )
 
 type event struct {
-	ts   time.Time
-	data string
+	TS   time.Time `json:"ts"`
+	Data string    `json:"data"`
 }
 
 func generateEvents(d *tempo.Dispatcher, sets, items int) {
@@ -20,10 +20,15 @@ func generateEvents(d *tempo.Dispatcher, sets, items int) {
 	for i := 0; i < sets; i++ {
 		for j := 0; j < items; j++ {
 			count++
-			if err := d.Enqueue(&event{
-				ts:   time.Now(),
-				data: fmt.Sprintf("Producer #%d, Item #%d", i, j),
-			}); err != nil {
+			payload, err := json.Marshal(event{
+				TS:   time.Now(),
+				Data: "Producer payload",
+			})
+			if err != nil {
+				log.Printf("marshal failed: %v", err)
+				return
+			}
+			if err := d.Enqueue(payload); err != nil {
 				log.Printf("enqueue failed: %v", err)
 				return
 			}
@@ -34,8 +39,9 @@ func generateEvents(d *tempo.Dispatcher, sets, items int) {
 
 func main() {
 	d, err := tempo.NewDispatcher(&tempo.Config{
-		Interval:      time.Duration(10) * time.Second,
-		MaxBatchItems: 100,
+		Interval:        10 * time.Second,
+		MaxBatchBytes:   64 * tempo.KiB,
+		MaxPendingBytes: 8 * tempo.MiB,
 	})
 	if err != nil {
 		log.Fatalf("new dispatcher: %v", err)
@@ -50,7 +56,9 @@ func main() {
 	log.Printf("  RUN SUMMARY")
 	log.Printf("  ---")
 	log.Printf("  tempo interval:         %s", d.Interval)
-	log.Printf("  tempo items per batch:  %d", d.MaxBatchItems)
+	log.Printf("  tempo max batch bytes:  %d", d.MaxBatchBytes)
+	log.Printf("  tempo max pending:      %d", d.MaxPendingBytes)
+	log.Printf("  payload mode:           []byte (json)")
 	log.Printf("  ---")
 	log.Printf("  producer sets:          %d", sets)
 	log.Printf("  items per set:          %d", items)
@@ -61,9 +69,16 @@ func main() {
 	dispatched := 0
 	for {
 		select {
-			// Batches exposes the consumer-facing stream as receive-only.
+		// Batches exposes the consumer-facing stream as receive-only.
 		case batch := <-d.Batches():
 			log.Printf("+ Got a batch of %d items.", len(batch))
+			for _, raw := range batch {
+				var e event
+				if err := json.Unmarshal(raw, &e); err != nil {
+					log.Printf("unmarshal failed: %v", err)
+					return
+				}
+			}
 			dispatched += len(batch)
 			log.Printf("+ Dispatched so far: %d", dispatched)
 			if dispatched == expectedItems {

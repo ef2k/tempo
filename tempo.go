@@ -7,16 +7,21 @@ import (
 	"time"
 )
 
-type item interface{}
-
 var (
-	ErrStopped       = errors.New("tempo: dispatcher stopped")
-	ErrShuttingDown  = errors.New("tempo: dispatcher shutting down")
-	ErrQueueFull     = errors.New("tempo: dispatcher queue full")
-	ErrNilConfig     = errors.New("tempo: nil config")
-	ErrBadInterval   = errors.New("tempo: interval must be greater than zero")
-	ErrBadMaxBatch   = errors.New("tempo: max batch items must be greater than zero")
-	ErrBadMaxPending = errors.New("tempo: max pending items must not be negative")
+	ErrStopped          = errors.New("tempo: dispatcher stopped")
+	ErrShuttingDown     = errors.New("tempo: dispatcher shutting down")
+	ErrQueueFull        = errors.New("tempo: dispatcher queue full")
+	ErrNilConfig        = errors.New("tempo: nil config")
+	ErrBadInterval      = errors.New("tempo: interval must be greater than zero")
+	ErrBadMaxBatchBytes = errors.New("tempo: max batch bytes must be greater than zero")
+	ErrBadMaxPending    = errors.New("tempo: max pending bytes must be greater than zero")
+	ErrPayloadTooLarge  = errors.New("tempo: payload exceeds configured byte limit")
+)
+
+const (
+	KiB int64 = 1024
+	MiB       = 1024 * KiB
+	GiB       = 1024 * MiB
 )
 
 type state int
@@ -32,11 +37,16 @@ type shutdownRequest struct {
 	done chan error
 }
 
-// Config configure time interval and set a batch limit.
+type queuedBatch struct {
+	items [][]byte
+	size  int64
+}
+
+// Config configures interval-based flushing and byte-oriented queue limits.
 type Config struct {
 	Interval        time.Duration
-	MaxBatchItems   int
-	MaxPendingItems int
+	MaxBatchBytes   int64
+	MaxPendingBytes int64
 }
 
 // NewDispatcher returns an initialized instance of Dispatcher.
@@ -47,52 +57,48 @@ func NewDispatcher(c *Config) (*Dispatcher, error) {
 	if c.Interval <= 0 {
 		return nil, ErrBadInterval
 	}
-	if c.MaxBatchItems <= 0 {
-		return nil, ErrBadMaxBatch
+	if c.MaxBatchBytes <= 0 {
+		return nil, ErrBadMaxBatchBytes
 	}
-	if c.MaxPendingItems < 0 {
+	if c.MaxPendingBytes <= 0 {
 		return nil, ErrBadMaxPending
-	}
-
-	var pendingSlots chan struct{}
-	if c.MaxPendingItems > 0 {
-		pendingSlots = make(chan struct{}, c.MaxPendingItems)
 	}
 
 	return &Dispatcher{
 		stop:            make(chan struct{}, 1),
 		shutdown:        make(chan shutdownRequest, 1),
 		closing:         make(chan struct{}),
-		pendingSlots:    pendingSlots,
-		Q:               make(chan item),
-		Batch:           make(chan []item),
+		Q:               make(chan []byte),
+		Batch:           make(chan [][]byte),
 		Interval:        c.Interval,
-		MaxBatchItems:   c.MaxBatchItems,
-		MaxPendingItems: c.MaxPendingItems,
+		MaxBatchBytes:   c.MaxBatchBytes,
+		MaxPendingBytes: c.MaxPendingBytes,
 	}, nil
 }
 
-// Dispatcher coordinates dispatching of queue items by time intervals
-// or immediately after the batching limit is met.
+// Dispatcher coordinates dispatching of queued payloads by time interval
+// or when the batch byte limit is met.
 type Dispatcher struct {
 	mu              sync.RWMutex
+	admitMu         sync.Mutex
 	state           state
 	stop            chan struct{}
 	shutdown        chan shutdownRequest
 	closing         chan struct{}
 	closeOnce       sync.Once
-	pendingSlots    chan struct{}
-	Q               chan item
-	Batch           chan []item
+	pendingBytes    int64
+	Q               chan []byte
+	Batch           chan [][]byte
 	Interval        time.Duration
-	MaxBatchItems   int
-	MaxPendingItems int
+	MaxBatchBytes   int64
+	MaxPendingBytes int64
 }
 
-// Start begins item dispatching.
+// Start begins payload dispatching.
 func (d *Dispatcher) Start() {
-	batch := make([]item, 0, d.MaxBatchItems)
-	ready := make([][]item, 0)
+	batch := make([][]byte, 0)
+	var batchBytes int64
+	ready := make([]queuedBatch, 0)
 	var shutdown *shutdownRequest
 
 	timer := time.NewTimer(d.Interval)
@@ -132,9 +138,18 @@ func (d *Dispatcher) Start() {
 		if len(batch) == 0 {
 			return
 		}
-		ready = append(ready, append([]item(nil), batch...))
-		batch = make([]item, 0, d.MaxBatchItems)
+		ready = append(ready, queuedBatch{
+			items: append([][]byte(nil), batch...),
+			size:  batchBytes,
+		})
+		batch = make([][]byte, 0)
+		batchBytes = 0
 		stopTimer()
+	}
+
+	releaseQueuedBytes := func() {
+		total := batchBytes + pendingBatchBytes(ready)
+		d.releasePendingBytes(total)
 	}
 
 	for {
@@ -142,14 +157,14 @@ func (d *Dispatcher) Start() {
 			queueBatch()
 		}
 
-		var out chan []item
-		var next []item
+		var out chan [][]byte
+		var next queuedBatch
 		if len(ready) > 0 {
 			out = d.Batch
 			next = ready[0]
 		}
 
-		var in chan item
+		var in chan []byte
 		var timerTick <-chan time.Time
 		if shutdown == nil {
 			in = d.Q
@@ -163,7 +178,7 @@ func (d *Dispatcher) Start() {
 
 		select {
 		case <-d.stop:
-			d.releasePendingSlots(len(batch) + pendingItemCount(ready))
+			releaseQueuedBytes()
 			stopTimer()
 			return
 		case req := <-d.shutdown:
@@ -183,23 +198,28 @@ func (d *Dispatcher) Start() {
 				return
 			}
 		case <-shutdownDone:
-			d.releasePendingSlots(len(batch) + pendingItemCount(ready))
+			releaseQueuedBytes()
 			d.setState(stateStopped)
 			shutdown.done <- shutdown.ctx.Err()
 			return
 		case m := <-in:
+			size := int64(len(m))
+			if len(batch) > 0 && batchBytes+size > d.MaxBatchBytes {
+				queueBatch()
+			}
 			if len(batch) == 0 {
 				startTimer()
 			}
 			batch = append(batch, m)
-			if len(batch) >= d.MaxBatchItems {
+			batchBytes += size
+			if batchBytes >= d.MaxBatchBytes {
 				queueBatch()
 			}
 		case <-timerTick:
 			queueBatch()
-		case out <- next:
+		case out <- next.items:
 			ready = ready[1:]
-			d.releasePendingSlots(len(next))
+			d.releasePendingBytes(next.size)
 			if shutdown != nil && len(ready) == 0 {
 				d.setState(stateStopped)
 				shutdown.done <- nil
@@ -244,46 +264,39 @@ func (d *Dispatcher) Shutdown(ctx context.Context) error {
 	}
 }
 
-// Enqueue submits an item while the dispatcher is running.
-func (d *Dispatcher) Enqueue(v any) error {
+// Enqueue submits a payload while the dispatcher is running.
+func (d *Dispatcher) Enqueue(v []byte) error {
 	if err := d.enqueueStateError(); err != nil {
 		return err
 	}
-	if d.pendingSlots == nil {
-		select {
-		case d.Q <- v:
-			return nil
-		default:
-		}
 
-		if err := d.enqueueStateError(); err != nil {
-			return err
-		}
-
-		d.Q <- v
-		return nil
+	size := int64(len(v))
+	if size > d.MaxBatchBytes || size > d.MaxPendingBytes {
+		return ErrPayloadTooLarge
 	}
 
-	if err := d.reservePendingSlot(); err != nil {
+	if err := d.reservePendingBytes(size); err != nil {
 		return err
 	}
 
+	payload := append([]byte(nil), v...)
+
 	select {
-	case d.Q <- v:
+	case d.Q <- payload:
 		return nil
 	default:
 	}
 
 	if err := d.enqueueStateError(); err != nil {
-		d.releasePendingSlots(1)
+		d.releasePendingBytes(size)
 		return err
 	}
 
 	select {
-	case d.Q <- v:
+	case d.Q <- payload:
 		return nil
 	case <-d.closing:
-		d.releasePendingSlots(1)
+		d.releasePendingBytes(size)
 		if err := d.enqueueStateError(); err != nil {
 			return err
 		}
@@ -292,7 +305,7 @@ func (d *Dispatcher) Enqueue(v any) error {
 }
 
 // Batches exposes the batch output stream as a read-only channel.
-func (d *Dispatcher) Batches() <-chan []item {
+func (d *Dispatcher) Batches() <-chan [][]byte {
 	return d.Batch
 }
 
@@ -322,35 +335,35 @@ func (d *Dispatcher) closeClosing() {
 	})
 }
 
-func (d *Dispatcher) reservePendingSlot() error {
-	if d.pendingSlots == nil {
-		return nil
-	}
-	select {
-	case d.pendingSlots <- struct{}{}:
-		return nil
-	default:
+func (d *Dispatcher) reservePendingBytes(n int64) error {
+	d.admitMu.Lock()
+	defer d.admitMu.Unlock()
+
+	if d.pendingBytes+n > d.MaxPendingBytes {
 		return ErrQueueFull
 	}
+	d.pendingBytes += n
+	return nil
 }
 
-func (d *Dispatcher) releasePendingSlots(n int) {
-	if d.pendingSlots == nil {
+func (d *Dispatcher) releasePendingBytes(n int64) {
+	if n <= 0 {
 		return
 	}
-	for i := 0; i < n; i++ {
-		select {
-		case <-d.pendingSlots:
-		default:
-			return
-		}
+
+	d.admitMu.Lock()
+	defer d.admitMu.Unlock()
+
+	d.pendingBytes -= n
+	if d.pendingBytes < 0 {
+		d.pendingBytes = 0
 	}
 }
 
-func pendingItemCount(ready [][]item) int {
-	total := 0
+func pendingBatchBytes(ready []queuedBatch) int64 {
+	var total int64
 	for _, batch := range ready {
-		total += len(batch)
+		total += batch.size
 	}
 	return total
 }

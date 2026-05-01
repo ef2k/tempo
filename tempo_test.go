@@ -1,6 +1,7 @@
 package tempo
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"sync"
@@ -14,6 +15,10 @@ func printf(s string, a ...interface{}) {
 	}
 }
 
+func payload(s string) []byte {
+	return []byte(s)
+}
+
 func newDispatcher(t *testing.T, c *Config) *Dispatcher {
 	t.Helper()
 
@@ -24,7 +29,7 @@ func newDispatcher(t *testing.T, c *Config) *Dispatcher {
 	return d
 }
 
-func enqueueWithin(t *testing.T, q chan item, v item, timeout time.Duration) {
+func enqueueWithin(t *testing.T, q chan []byte, v []byte, timeout time.Duration) {
 	t.Helper()
 
 	done := make(chan struct{})
@@ -40,7 +45,7 @@ func enqueueWithin(t *testing.T, q chan item, v item, timeout time.Duration) {
 	}
 }
 
-func receiveBatchWithin(t *testing.T, batches <-chan []item, timeout time.Duration) []item {
+func receiveBatchWithin(t *testing.T, batches <-chan [][]byte, timeout time.Duration) [][]byte {
 	t.Helper()
 
 	select {
@@ -88,7 +93,7 @@ func shutdownWithin(t *testing.T, d *Dispatcher, timeout time.Duration) error {
 	}
 }
 
-func produce(q chan item, numItems, numGoroutines int, out chan []string) {
+func produce(q chan []byte, numItems, numGoroutines int, out chan []string) {
 	printf("=== Producing %d items.\n", numItems*numGoroutines)
 	done := make(chan bool, 1)
 	msgs := make(chan string)
@@ -99,7 +104,7 @@ func produce(q chan item, numItems, numGoroutines int, out chan []string) {
 			go func(routineIdx int) {
 				for j := 0; j < numItems; j++ {
 					m := fmt.Sprintf("producer#%d, item#%d", routineIdx, j)
-					q <- m
+					q <- []byte(m)
 					msgs <- m
 				}
 				wg.Done()
@@ -121,11 +126,22 @@ L:
 	out <- coll
 }
 
-// Test: Reject bad config up front.
-//
-// Tempo needs a real interval and a positive batch size. If those are wrong,
-// construction should fail right away instead of leaving us with weird runtime
-// behavior later.
+func batchStrings(batch [][]byte) []string {
+	out := make([]string, len(batch))
+	for i, item := range batch {
+		out[i] = string(item)
+	}
+	return out
+}
+
+func totalBatchBytes(batch [][]byte) int64 {
+	var total int64
+	for _, item := range batch {
+		total += int64(len(item))
+	}
+	return total
+}
+
 func TestNewDispatcherRejectsInvalidConfig(t *testing.T) {
 	t.Run("nil config", func(t *testing.T) {
 		if _, err := NewDispatcher(nil); err == nil {
@@ -134,43 +150,41 @@ func TestNewDispatcherRejectsInvalidConfig(t *testing.T) {
 	})
 
 	t.Run("zero interval", func(t *testing.T) {
-		if _, err := NewDispatcher(&Config{Interval: 0, MaxBatchItems: 10}); err == nil {
+		if _, err := NewDispatcher(&Config{Interval: 0, MaxBatchBytes: 10, MaxPendingBytes: 20}); err == nil {
 			t.Fatal("expected zero interval to be rejected")
 		}
 	})
 
 	t.Run("negative interval", func(t *testing.T) {
-		if _, err := NewDispatcher(&Config{Interval: -1 * time.Second, MaxBatchItems: 10}); err == nil {
+		if _, err := NewDispatcher(&Config{Interval: -1 * time.Second, MaxBatchBytes: 10, MaxPendingBytes: 20}); err == nil {
 			t.Fatal("expected negative interval to be rejected")
 		}
 	})
 
-	t.Run("zero max batch items", func(t *testing.T) {
-		if _, err := NewDispatcher(&Config{Interval: time.Second, MaxBatchItems: 0}); err == nil {
-			t.Fatal("expected zero max batch items to be rejected")
+	t.Run("zero max batch bytes", func(t *testing.T) {
+		if _, err := NewDispatcher(&Config{Interval: time.Second, MaxBatchBytes: 0, MaxPendingBytes: 20}); err == nil {
+			t.Fatal("expected zero max batch bytes to be rejected")
 		}
 	})
 
-	t.Run("negative max batch items", func(t *testing.T) {
-		if _, err := NewDispatcher(&Config{Interval: time.Second, MaxBatchItems: -1}); err == nil {
-			t.Fatal("expected negative max batch items to be rejected")
+	t.Run("negative max batch bytes", func(t *testing.T) {
+		if _, err := NewDispatcher(&Config{Interval: time.Second, MaxBatchBytes: -1, MaxPendingBytes: 20}); err == nil {
+			t.Fatal("expected negative max batch bytes to be rejected")
 		}
 	})
 
-	t.Run("negative max pending items", func(t *testing.T) {
-		if _, err := NewDispatcher(&Config{Interval: time.Second, MaxBatchItems: 10, MaxPendingItems: -1}); err == nil {
-			t.Fatal("expected negative max pending items to be rejected")
+	t.Run("zero max pending bytes", func(t *testing.T) {
+		if _, err := NewDispatcher(&Config{Interval: time.Second, MaxBatchBytes: 10, MaxPendingBytes: 0}); err == nil {
+			t.Fatal("expected zero max pending bytes to be rejected")
 		}
 	})
 }
 
-// Test: Accept valid config.
-//
-// A normal interval and batch size should give us a usable dispatcher.
 func TestNewDispatcherAcceptsValidConfig(t *testing.T) {
 	d, err := NewDispatcher(&Config{
-		Interval:      time.Second,
-		MaxBatchItems: 10,
+		Interval:        time.Second,
+		MaxBatchBytes:   10,
+		MaxPendingBytes: 100,
 	})
 	if err != nil {
 		t.Fatalf("expected valid config to succeed, got %v", err)
@@ -180,14 +194,11 @@ func TestNewDispatcherAcceptsValidConfig(t *testing.T) {
 	}
 }
 
-// Test: Under concurrent load, keep every item and only the items we produced.
-//
-// This pushes a lot of items through repeated rollover and checks that we get
-// the full produced set back out.
 func TestDispatchOrder(t *testing.T) {
 	d := newDispatcher(t, &Config{
-		Interval:      time.Duration(1) * time.Second,
-		MaxBatchItems: 500,
+		Interval:        time.Second,
+		MaxBatchBytes:   16 * KiB,
+		MaxPendingBytes: 2 * MiB,
 	})
 	defer d.Stop()
 	go d.Start()
@@ -202,17 +213,14 @@ func TestDispatchOrder(t *testing.T) {
 
 	var dispatched []string
 	breakout := make(chan bool)
-	time.AfterFunc(time.Duration(3)*time.Second, func() {
+	time.AfterFunc(3*time.Second, func() {
 		breakout <- true
 	})
 L:
 	for {
 		select {
 		case batch := <-d.Batch:
-			for _, b := range batch {
-				m := b.(string)
-				dispatched = append(dispatched, m)
-			}
+			dispatched = append(dispatched, batchStrings(batch)...)
 		case <-breakout:
 			break L
 		}
@@ -238,101 +246,77 @@ L:
 	})
 }
 
-// Test: Flush right away when the batch fills up.
-//
-// If we hit max batch size, Tempo should flush without waiting for the timer.
-func TestFlushesImmediatelyWhenBatchIsFull(t *testing.T) {
+func TestFlushesImmediatelyWhenBatchBytesAreFull(t *testing.T) {
 	d := newDispatcher(t, &Config{
-		Interval:      time.Hour,
-		MaxBatchItems: 2,
+		Interval:        time.Hour,
+		MaxBatchBytes:   int64(len("first") + len("second")),
+		MaxPendingBytes: 128,
 	})
 	go d.Start()
 	t.Cleanup(func() {
 		stopWithin(t, d, 2*time.Second)
 	})
 
-	enqueueWithin(t, d.Q, "first", 100*time.Millisecond)
-	enqueueWithin(t, d.Q, "second", 100*time.Millisecond)
+	enqueueWithin(t, d.Q, payload("first"), 100*time.Millisecond)
+	enqueueWithin(t, d.Q, payload("second"), 100*time.Millisecond)
 
 	batch := receiveBatchWithin(t, d.Batch, 200*time.Millisecond)
-	if len(batch) != 2 {
-		t.Fatalf("expected 2 items in flushed batch, got %d", len(batch))
-	}
-	if batch[0] != "first" || batch[1] != "second" {
-		t.Fatalf("expected flushed batch to contain first, second; got %#v", batch)
+	if got := batchStrings(batch); len(got) != 2 || got[0] != "first" || got[1] != "second" {
+		t.Fatalf("expected flushed batch to contain first, second; got %#v", got)
 	}
 }
 
-// Test: Flush pending items when the interval elapses.
-//
-// A partial batch should still flush on time even if it never fills up.
 func TestFlushesPendingItemsWhenIntervalElapses(t *testing.T) {
 	d := newDispatcher(t, &Config{
-		Interval:      50 * time.Millisecond,
-		MaxBatchItems: 10,
+		Interval:        50 * time.Millisecond,
+		MaxBatchBytes:   1 * KiB,
+		MaxPendingBytes: 8 * KiB,
 	})
 	go d.Start()
 	t.Cleanup(func() {
 		stopWithin(t, d, 2*time.Second)
 	})
 
-	enqueueWithin(t, d.Q, "first", 100*time.Millisecond)
+	enqueueWithin(t, d.Q, payload("first"), 100*time.Millisecond)
 
 	batch := receiveBatchWithin(t, d.Batch, 500*time.Millisecond)
-	if len(batch) != 1 || batch[0] != "first" {
-		t.Fatalf("expected interval flush to emit [first], got %#v", batch)
+	if len(batch) != 1 || !bytes.Equal(batch[0], payload("first")) {
+		t.Fatalf("expected interval flush to emit [first], got %#v", batchStrings(batch))
 	}
 }
 
-// Test: Keep order within a batch for sequential input.
-//
-// If one producer submits a simple ordered sequence, Tempo should hand that
-// same order back within the emitted batch.
 func TestPreservesSequentialOrderWithinBatch(t *testing.T) {
 	d := newDispatcher(t, &Config{
-		Interval:      50 * time.Millisecond,
-		MaxBatchItems: 10,
+		Interval:        50 * time.Millisecond,
+		MaxBatchBytes:   1 * KiB,
+		MaxPendingBytes: 8 * KiB,
 	})
 	go d.Start()
 	t.Cleanup(func() {
 		stopWithin(t, d, 2*time.Second)
 	})
 
-	enqueueWithin(t, d.Q, "first", 100*time.Millisecond)
-	enqueueWithin(t, d.Q, "second", 100*time.Millisecond)
-	enqueueWithin(t, d.Q, "third", 100*time.Millisecond)
+	enqueueWithin(t, d.Q, payload("first"), 100*time.Millisecond)
+	enqueueWithin(t, d.Q, payload("second"), 100*time.Millisecond)
+	enqueueWithin(t, d.Q, payload("third"), 100*time.Millisecond)
 
 	batch := receiveBatchWithin(t, d.Batch, 500*time.Millisecond)
-	if len(batch) != 3 {
-		t.Fatalf("expected 3 items in batch, got %d", len(batch))
-	}
-	if batch[0] != "first" || batch[1] != "second" || batch[2] != "third" {
-		t.Fatalf("expected batch order [first second third], got %#v", batch)
+	if got := batchStrings(batch); len(got) != 3 || got[0] != "first" || got[1] != "second" || got[2] != "third" {
+		t.Fatalf("expected batch order [first second third], got %#v", got)
 	}
 }
 
-// Test: When under high-frequency, keep coordinating intake, rollover, and
-// shutdown even when batch delivery is under pressure.
-//
-// Here we force the dispatcher into the "batch full" path while no consumer is
-// reading d.Batch. Publishing that full batch must not block the dispatch loop
-// so completely that the dispatcher can no longer coordinate its own work.
-//
-// Stop() is the visible signal in this test, but the issue being covered is
-// broader. The dispatcher must preserve internal liveness even when batch
-// delivery is momentarily blocked.
 func TestBlockedBatchConsumerTrapsDispatcher(t *testing.T) {
 	d := newDispatcher(t, &Config{
-		Interval:      time.Hour,
-		MaxBatchItems: 1,
+		Interval:        time.Hour,
+		MaxBatchBytes:   1,
+		MaxPendingBytes: 8,
 	})
 	go d.Start()
 
-	enqueueWithin(t, d.Q, "first", 100*time.Millisecond)
-	enqueueWithin(t, d.Q, "second", 100*time.Millisecond)
+	enqueueWithin(t, d.Q, payload("a"), 100*time.Millisecond)
+	enqueueWithin(t, d.Q, payload("b"), 100*time.Millisecond)
 
-	// Give the dispatcher a moment to hit the "batch full" path and block while
-	// trying to publish the first batch to the unread Batch channel.
 	time.Sleep(50 * time.Millisecond)
 
 	stopDone := make(chan struct{})
@@ -363,60 +347,45 @@ func TestBlockedBatchConsumerTrapsDispatcher(t *testing.T) {
 	}
 }
 
-// Test: Stop returns promptly without waiting for buffered items to drain.
-//
-// Here we enqueue an item into a partially filled batch and then call Stop
-// before either the interval or batch size would force a flush. The observable
-// signal is that Stop returns quickly, but the broader requirement is that the
-// immediate-stop path must not depend on draining buffered work first.
 func TestStopReturnsPromptlyWithoutDrainingBufferedItems(t *testing.T) {
 	d := newDispatcher(t, &Config{
-		Interval:      time.Hour,
-		MaxBatchItems: 10,
+		Interval:        time.Hour,
+		MaxBatchBytes:   1 * KiB,
+		MaxPendingBytes: 8 * KiB,
 	})
 	go d.Start()
 
-	enqueueWithin(t, d.Q, "first", 100*time.Millisecond)
+	enqueueWithin(t, d.Q, payload("first"), 100*time.Millisecond)
 	stopWithin(t, d, 200*time.Millisecond)
 }
 
-// Test: Stop abandons buffered items instead of flushing them.
-//
-// Here we enqueue an item and stop the dispatcher before any normal flush
-// trigger occurs. The observable signal is that no batch is emitted after Stop
-// returns, but the broader requirement is that immediate stop and graceful
-// drain are different lifecycle operations.
 func TestStopDropsBufferedItems(t *testing.T) {
 	d := newDispatcher(t, &Config{
-		Interval:      time.Hour,
-		MaxBatchItems: 10,
+		Interval:        time.Hour,
+		MaxBatchBytes:   1 * KiB,
+		MaxPendingBytes: 8 * KiB,
 	})
 	go d.Start()
 
-	enqueueWithin(t, d.Q, "first", 100*time.Millisecond)
+	enqueueWithin(t, d.Q, payload("first"), 100*time.Millisecond)
 	stopWithin(t, d, 200*time.Millisecond)
 
 	select {
 	case batch := <-d.Batch:
-		t.Fatalf("expected Stop to drop buffered items, got flushed batch %#v", batch)
+		t.Fatalf("expected Stop to drop buffered items, got flushed batch %#v", batchStrings(batch))
 	case <-time.After(150 * time.Millisecond):
 	}
 }
 
-// Test: Shutdown flushes buffered items before returning.
-//
-// Here we enqueue an item into a partial batch and call Shutdown before any
-// timer-based flush would occur. The observable signal is that Shutdown returns
-// only after the final buffered item is emitted, but the broader requirement is
-// that graceful drain preserves in-flight work.
 func TestShutdownFlushesBufferedItemsBeforeReturning(t *testing.T) {
 	d := newDispatcher(t, &Config{
-		Interval:      time.Hour,
-		MaxBatchItems: 10,
+		Interval:        time.Hour,
+		MaxBatchBytes:   1 * KiB,
+		MaxPendingBytes: 8 * KiB,
 	})
 	go d.Start()
 
-	enqueueWithin(t, d.Q, "first", 100*time.Millisecond)
+	enqueueWithin(t, d.Q, payload("first"), 100*time.Millisecond)
 
 	done := make(chan error, 1)
 	go func() {
@@ -432,8 +401,8 @@ func TestShutdownFlushesBufferedItemsBeforeReturning(t *testing.T) {
 	}
 
 	batch := receiveBatchWithin(t, d.Batch, 500*time.Millisecond)
-	if len(batch) != 1 || batch[0] != "first" {
-		t.Fatalf("expected Shutdown to flush [first], got %#v", batch)
+	if len(batch) != 1 || !bytes.Equal(batch[0], payload("first")) {
+		t.Fatalf("expected Shutdown to flush [first], got %#v", batchStrings(batch))
 	}
 
 	select {
@@ -446,21 +415,15 @@ func TestShutdownFlushesBufferedItemsBeforeReturning(t *testing.T) {
 	}
 }
 
-// Test: Shutdown respects context cancellation when graceful drain cannot
-// complete.
-//
-// Here we enqueue enough items to form a full batch and then call Shutdown
-// without any batch consumer to receive it. The observable signal is that
-// Shutdown returns the context error, but the broader requirement is that
-// graceful drain must be externally bounded when delivery cannot finish.
 func TestShutdownReturnsContextErrorWhenDrainCannotComplete(t *testing.T) {
 	d := newDispatcher(t, &Config{
-		Interval:      time.Hour,
-		MaxBatchItems: 1,
+		Interval:        time.Hour,
+		MaxBatchBytes:   1,
+		MaxPendingBytes: 8,
 	})
 	go d.Start()
 
-	enqueueWithin(t, d.Q, "first", 100*time.Millisecond)
+	enqueueWithin(t, d.Q, payload("a"), 100*time.Millisecond)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
@@ -474,65 +437,74 @@ func TestShutdownReturnsContextErrorWhenDrainCannotComplete(t *testing.T) {
 	}
 }
 
-// Test: Enqueue accepts items while the dispatcher is running.
-//
-// Interact with tempo through an API layer, encapsulating its internals. this
-// way the caller has a way to know if the queue is available when adding items
-// or if its not accepting items because its in the middle of a shutdown.
 func TestEnqueueAcceptsItemsWhileRunning(t *testing.T) {
 	d := newDispatcher(t, &Config{
-		Interval:      50 * time.Millisecond,
-		MaxBatchItems: 10,
+		Interval:        50 * time.Millisecond,
+		MaxBatchBytes:   1 * KiB,
+		MaxPendingBytes: 8 * KiB,
 	})
 	go d.Start()
 	t.Cleanup(func() {
 		stopWithin(t, d, 2*time.Second)
 	})
 
-	if err := d.Enqueue("first"); err != nil {
+	if err := d.Enqueue(payload("first")); err != nil {
 		t.Fatalf("expected Enqueue to accept items while running, got %v", err)
 	}
 
 	batch := receiveBatchWithin(t, d.Batch, 500*time.Millisecond)
-	if len(batch) != 1 || batch[0] != "first" {
-		t.Fatalf("expected Enqueue path to emit [first], got %#v", batch)
+	if len(batch) != 1 || !bytes.Equal(batch[0], payload("first")) {
+		t.Fatalf("expected Enqueue path to emit [first], got %#v", batchStrings(batch))
 	}
 }
 
-// Test: Enqueue returns an error after Stop begins.
-//
-// Here we stop the dispatcher and then attempt to enqueue through the method
-// API. Tempo should signal an enqueue error, but the broader requirement
-// is that Tempo must reject new work explicitly once immediate shutdown starts
-// instead of leaving callers to block on internal channels.
+func TestEnqueueCopiesPayload(t *testing.T) {
+	d := newDispatcher(t, &Config{
+		Interval:        50 * time.Millisecond,
+		MaxBatchBytes:   1 * KiB,
+		MaxPendingBytes: 8 * KiB,
+	})
+	go d.Start()
+	t.Cleanup(func() {
+		stopWithin(t, d, 2*time.Second)
+	})
+
+	original := []byte("first")
+	if err := d.Enqueue(original); err != nil {
+		t.Fatalf("expected Enqueue to accept items while running, got %v", err)
+	}
+	copy(original, []byte("mutat"))
+
+	batch := receiveBatchWithin(t, d.Batch, 500*time.Millisecond)
+	if got := string(batch[0]); got != "first" {
+		t.Fatalf("expected queued payload copy to preserve original bytes, got %q", got)
+	}
+}
+
 func TestEnqueueReturnsErrorAfterStop(t *testing.T) {
 	d := newDispatcher(t, &Config{
-		Interval:      time.Hour,
-		MaxBatchItems: 10,
+		Interval:        time.Hour,
+		MaxBatchBytes:   1 * KiB,
+		MaxPendingBytes: 8 * KiB,
 	})
 	go d.Start()
 
 	stopWithin(t, d, 200*time.Millisecond)
 
-	if err := d.Enqueue("first"); err == nil {
+	if err := d.Enqueue(payload("first")); err == nil {
 		t.Fatal("expected Enqueue to reject new work after Stop")
 	}
 }
 
-// Test: Enqueue returns an error after graceful shutdown begins.
-//
-// Here we start Shutdown and then attempt to enqueue through the method API
-// before the dispatcher exits. Tempo should signal an enqueue error, but
-// the broader requirement is that graceful drain must stop accepting new work
-// while it finishes what's already in the buffer.
 func TestEnqueueReturnsErrorAfterShutdownBegins(t *testing.T) {
 	d := newDispatcher(t, &Config{
-		Interval:      time.Hour,
-		MaxBatchItems: 10,
+		Interval:        time.Hour,
+		MaxBatchBytes:   1 * KiB,
+		MaxPendingBytes: 8 * KiB,
 	})
 	go d.Start()
 
-	if err := d.Enqueue("first"); err != nil {
+	if err := d.Enqueue(payload("first")); err != nil {
 		t.Fatalf("expected initial enqueue to succeed, got %v", err)
 	}
 
@@ -549,13 +521,13 @@ func TestEnqueueReturnsErrorAfterShutdownBegins(t *testing.T) {
 	case <-time.After(100 * time.Millisecond):
 	}
 
-	if err := d.Enqueue("second"); err == nil {
+	if err := d.Enqueue(payload("second")); err == nil {
 		t.Fatal("expected Enqueue to reject new work after Shutdown begins")
 	}
 
 	batch := receiveBatchWithin(t, d.Batch, 500*time.Millisecond)
-	if len(batch) != 1 || batch[0] != "first" {
-		t.Fatalf("expected Shutdown to drain only the owned item, got %#v", batch)
+	if len(batch) != 1 || !bytes.Equal(batch[0], payload("first")) {
+		t.Fatalf("expected Shutdown to drain only the owned item, got %#v", batchStrings(batch))
 	}
 
 	select {
@@ -568,27 +540,21 @@ func TestEnqueueReturnsErrorAfterShutdownBegins(t *testing.T) {
 	}
 }
 
-// Test: Enqueue rejects new work once pending ownership reaches the configured
-// boundary.
-//
-// Here we let Tempo accumulate exactly two accepted items while no consumer is
-// draining batches. The third enqueue should fail with an explicit overload
-// error instead of allowing unbounded in-memory growth.
 func TestEnqueueReturnsQueueFullAtPendingLimit(t *testing.T) {
 	d := newDispatcher(t, &Config{
 		Interval:        time.Hour,
-		MaxBatchItems:   1,
-		MaxPendingItems: 2,
+		MaxBatchBytes:   1,
+		MaxPendingBytes: 2,
 	})
 	go d.Start()
 
-	if err := d.Enqueue("first"); err != nil {
+	if err := d.Enqueue(payload("a")); err != nil {
 		t.Fatalf("expected first Enqueue to succeed, got %v", err)
 	}
-	if err := d.Enqueue("second"); err != nil {
+	if err := d.Enqueue(payload("b")); err != nil {
 		t.Fatalf("expected second Enqueue to succeed, got %v", err)
 	}
-	if err := d.Enqueue("third"); err != ErrQueueFull {
+	if err := d.Enqueue(payload("c")); err != ErrQueueFull {
 		t.Fatalf("expected third Enqueue to fail with ErrQueueFull, got %v", err)
 	}
 
@@ -602,16 +568,11 @@ func TestEnqueueReturnsQueueFullAtPendingLimit(t *testing.T) {
 	}
 }
 
-// Test: Enqueue starts succeeding again after pending ownership drains below
-// the configured boundary.
-//
-// Here we fill the limit, observe an overload error, then receive one batch.
-// Once Tempo no longer owns that first item, another enqueue should succeed.
 func TestEnqueueSucceedsAgainAfterPendingLimitDrains(t *testing.T) {
 	d := newDispatcher(t, &Config{
 		Interval:        time.Hour,
-		MaxBatchItems:   1,
-		MaxPendingItems: 2,
+		MaxBatchBytes:   1,
+		MaxPendingBytes: 2,
 	})
 	go d.Start()
 	t.Cleanup(func() {
@@ -627,89 +588,166 @@ func TestEnqueueSucceedsAgainAfterPendingLimitDrains(t *testing.T) {
 		_ = shutdownWithin(t, d, time.Second)
 	})
 
-	if err := d.Enqueue("first"); err != nil {
+	if err := d.Enqueue(payload("a")); err != nil {
 		t.Fatalf("expected first Enqueue to succeed, got %v", err)
 	}
-	if err := d.Enqueue("second"); err != nil {
+	if err := d.Enqueue(payload("b")); err != nil {
 		t.Fatalf("expected second Enqueue to succeed, got %v", err)
 	}
-	if err := d.Enqueue("third"); err != ErrQueueFull {
+	if err := d.Enqueue(payload("c")); err != ErrQueueFull {
 		t.Fatalf("expected third Enqueue to fail with ErrQueueFull, got %v", err)
 	}
 
 	batch := receiveBatchWithin(t, d.Batch, 200*time.Millisecond)
-	if len(batch) != 1 || batch[0] != "first" {
-		t.Fatalf("expected first drained batch to contain [first], got %#v", batch)
+	if len(batch) != 1 || !bytes.Equal(batch[0], payload("a")) {
+		t.Fatalf("expected first drained batch to contain [a], got %#v", batchStrings(batch))
 	}
 
-	if err := d.Enqueue("third"); err != nil {
+	if err := d.Enqueue(payload("c")); err != nil {
 		t.Fatalf("expected Enqueue to succeed once pending ownership dropped, got %v", err)
 	}
 }
 
-// Test: Batches exposes Tempo's output stream as a read-only API surface.
-//
-// Here we consume batches through the method API instead of reading the
-// exported channel directly. Tempo should signal that the emitted batch is
-// still available to callers, but the broader requirement is that Tempo can
-// expose consumption without forcing callers to depend on writing to internals.
-func TestBatchesExposesReadOnlyOutputStream(t *testing.T) {
+func TestEnqueueRejectsPayloadLargerThanByteLimits(t *testing.T) {
 	d := newDispatcher(t, &Config{
-		Interval:      50 * time.Millisecond,
-		MaxBatchItems: 10,
+		Interval:        time.Hour,
+		MaxBatchBytes:   4,
+		MaxPendingBytes: 8,
 	})
 	go d.Start()
 	t.Cleanup(func() {
 		stopWithin(t, d, 2*time.Second)
 	})
 
-	if err := d.Enqueue("first"); err != nil {
+	if err := d.Enqueue(payload("12345")); err != ErrPayloadTooLarge {
+		t.Fatalf("expected oversized payload to be rejected by batch limit, got %v", err)
+	}
+
+	d2 := newDispatcher(t, &Config{
+		Interval:        time.Hour,
+		MaxBatchBytes:   8,
+		MaxPendingBytes: 4,
+	})
+	go d2.Start()
+	t.Cleanup(func() {
+		stopWithin(t, d2, 2*time.Second)
+	})
+
+	if err := d2.Enqueue(payload("12345")); err != ErrPayloadTooLarge {
+		t.Fatalf("expected oversized payload to be rejected by pending limit, got %v", err)
+	}
+}
+
+func TestFlushesBeforeAppendingPayloadThatWouldOverflowBatch(t *testing.T) {
+	d := newDispatcher(t, &Config{
+		Interval:        50 * time.Millisecond,
+		MaxBatchBytes:   5,
+		MaxPendingBytes: 32,
+	})
+	go d.Start()
+	t.Cleanup(func() {
+		stopWithin(t, d, 2*time.Second)
+	})
+
+	if err := d.Enqueue(payload("abc")); err != nil {
+		t.Fatalf("expected first enqueue to succeed, got %v", err)
+	}
+	if err := d.Enqueue(payload("de")); err != nil {
+		t.Fatalf("expected second enqueue to succeed, got %v", err)
+	}
+	if err := d.Enqueue(payload("fg")); err != nil {
+		t.Fatalf("expected third enqueue to succeed, got %v", err)
+	}
+
+	first := receiveBatchWithin(t, d.Batches(), 200*time.Millisecond)
+	if got := batchStrings(first); len(got) != 2 || got[0] != "abc" || got[1] != "de" {
+		t.Fatalf("expected first batch [abc de], got %#v", got)
+	}
+
+	second := receiveBatchWithin(t, d.Batches(), 200*time.Millisecond)
+	if got := batchStrings(second); len(got) != 1 || got[0] != "fg" {
+		t.Fatalf("expected second batch [fg], got %#v", got)
+	}
+}
+
+func TestBatchByteLimitBoundsEmittedBatchSize(t *testing.T) {
+	d := newDispatcher(t, &Config{
+		Interval:        100 * time.Millisecond,
+		MaxBatchBytes:   4,
+		MaxPendingBytes: 32,
+	})
+	go d.Start()
+	t.Cleanup(func() {
+		stopWithin(t, d, 2*time.Second)
+	})
+
+	for _, item := range [][]byte{payload("aa"), payload("bb"), payload("cc")} {
+		if err := d.Enqueue(item); err != nil {
+			t.Fatalf("enqueue failed: %v", err)
+		}
+	}
+
+	first := receiveBatchWithin(t, d.Batches(), 200*time.Millisecond)
+	if got := totalBatchBytes(first); got > 4 {
+		t.Fatalf("expected first batch to stay within byte limit, got %d", got)
+	}
+
+	second := receiveBatchWithin(t, d.Batches(), 300*time.Millisecond)
+	if got := totalBatchBytes(second); got > 4 {
+		t.Fatalf("expected second batch to stay within byte limit, got %d", got)
+	}
+}
+
+func TestBatchesExposesReadOnlyOutputStream(t *testing.T) {
+	d := newDispatcher(t, &Config{
+		Interval:        50 * time.Millisecond,
+		MaxBatchBytes:   1 * KiB,
+		MaxPendingBytes: 8 * KiB,
+	})
+	go d.Start()
+	t.Cleanup(func() {
+		stopWithin(t, d, 2*time.Second)
+	})
+
+	if err := d.Enqueue(payload("first")); err != nil {
 		t.Fatalf("expected Enqueue to accept items while running, got %v", err)
 	}
 
 	batch := receiveBatchWithin(t, d.Batches(), 500*time.Millisecond)
-	if len(batch) != 1 || batch[0] != "first" {
-		t.Fatalf("expected Batches view to emit [first], got %#v", batch)
+	if len(batch) != 1 || !bytes.Equal(batch[0], payload("first")) {
+		t.Fatalf("expected Batches view to emit [first], got %#v", batchStrings(batch))
 	}
 }
 
-// Test: Method-based usage preserves Tempo's batching behavior.
-//
-// Here we drive both submission and consumption through Enqueue and Batches
-// rather than the directly to internals.
 func TestMethodBasedUsagePreservesBatchingBehavior(t *testing.T) {
 	d := newDispatcher(t, &Config{
-		Interval:      time.Hour,
-		MaxBatchItems: 2,
+		Interval:        time.Hour,
+		MaxBatchBytes:   int64(len("first") + len("second")),
+		MaxPendingBytes: 8 * KiB,
 	})
 	go d.Start()
 	t.Cleanup(func() {
 		stopWithin(t, d, 2*time.Second)
 	})
 
-	if err := d.Enqueue("first"); err != nil {
+	if err := d.Enqueue(payload("first")); err != nil {
 		t.Fatalf("expected first Enqueue to succeed, got %v", err)
 	}
-	if err := d.Enqueue("second"); err != nil {
+	if err := d.Enqueue(payload("second")); err != nil {
 		t.Fatalf("expected second Enqueue to succeed, got %v", err)
 	}
 
 	batch := receiveBatchWithin(t, d.Batches(), 200*time.Millisecond)
-	if len(batch) != 2 {
-		t.Fatalf("expected 2 items in flushed batch, got %d", len(batch))
-	}
-	if batch[0] != "first" || batch[1] != "second" {
-		t.Fatalf("expected flushed batch to contain first, second; got %#v", batch)
+	if got := batchStrings(batch); len(got) != 2 || got[0] != "first" || got[1] != "second" {
+		t.Fatalf("expected flushed batch to contain first, second; got %#v", got)
 	}
 }
 
-// Test: Stop can be called more than once.
-//
-// Repeated immediate-stop calls should be harmless.
 func TestStopIsSafeToCallMoreThanOnce(t *testing.T) {
 	d := newDispatcher(t, &Config{
-		Interval:      time.Hour,
-		MaxBatchItems: 10,
+		Interval:        time.Hour,
+		MaxBatchBytes:   1 * KiB,
+		MaxPendingBytes: 8 * KiB,
 	})
 	go d.Start()
 
@@ -717,17 +755,15 @@ func TestStopIsSafeToCallMoreThanOnce(t *testing.T) {
 	stopWithin(t, d, 200*time.Millisecond)
 }
 
-// Test: Shutdown can be called more than once after a clean drain.
-//
-// Once Tempo has finished draining, repeated shutdown calls should not blow up.
 func TestShutdownIsSafeToCallMoreThanOnce(t *testing.T) {
 	d := newDispatcher(t, &Config{
-		Interval:      time.Hour,
-		MaxBatchItems: 10,
+		Interval:        time.Hour,
+		MaxBatchBytes:   1 * KiB,
+		MaxPendingBytes: 8 * KiB,
 	})
 	go d.Start()
 
-	if err := d.Enqueue("first"); err != nil {
+	if err := d.Enqueue(payload("first")); err != nil {
 		t.Fatalf("expected Enqueue to accept items while running, got %v", err)
 	}
 
@@ -739,8 +775,8 @@ func TestShutdownIsSafeToCallMoreThanOnce(t *testing.T) {
 	}()
 
 	batch := receiveBatchWithin(t, d.Batches(), 500*time.Millisecond)
-	if len(batch) != 1 || batch[0] != "first" {
-		t.Fatalf("expected Shutdown to drain [first], got %#v", batch)
+	if len(batch) != 1 || !bytes.Equal(batch[0], payload("first")) {
+		t.Fatalf("expected Shutdown to drain [first], got %#v", batchStrings(batch))
 	}
 
 	select {
@@ -757,18 +793,15 @@ func TestShutdownIsSafeToCallMoreThanOnce(t *testing.T) {
 	}
 }
 
-// Test: Stop wins if it arrives while a graceful shutdown is in progress.
-//
-// If someone asks for an immediate stop during drain, Tempo should stop without
-// getting stuck.
 func TestStopAfterShutdownBeginsDoesNotHang(t *testing.T) {
 	d := newDispatcher(t, &Config{
-		Interval:      time.Hour,
-		MaxBatchItems: 10,
+		Interval:        time.Hour,
+		MaxBatchBytes:   1 * KiB,
+		MaxPendingBytes: 8 * KiB,
 	})
 	go d.Start()
 
-	if err := d.Enqueue("first"); err != nil {
+	if err := d.Enqueue(payload("first")); err != nil {
 		t.Fatalf("expected Enqueue to accept items while running, got %v", err)
 	}
 
