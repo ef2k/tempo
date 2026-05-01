@@ -629,26 +629,44 @@ func TestStressHighConcurrencyDelivery(t *testing.T) {
 
 	delivered := 0
 	deadline := time.After(20 * time.Second)
+	producersDone := false
+	shutdownDone := make(chan error, 1)
 
-	for delivered < expectedDelivered {
+	for {
+		if delivered >= expectedDelivered {
+			break
+		}
 		select {
 		case batch := <-d.Batches():
 			delivered += len(batch)
+		case <-doneProducing:
+			if !producersDone {
+				producersDone = true
+				go func() {
+					ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+					defer cancel()
+					shutdownDone <- d.Shutdown(ctx)
+				}()
+			}
+		case err := <-shutdownDone:
+			if err != nil {
+				t.Fatalf("shutdown under stress load: %v", err)
+			}
 		case <-deadline:
 			t.Fatalf("timed out under stress load: delivered %d of %d items", delivered, expectedDelivered)
 		}
+
+		if producersDone && delivered >= expectedDelivered {
+			break
+		}
 	}
 
-	select {
-	case <-doneProducing:
-	case <-time.After(2 * time.Second):
-		t.Fatal("producers did not finish after all items were delivered")
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	if err := d.Shutdown(ctx); err != nil {
-		t.Fatalf("shutdown under stress load: %v", err)
+	if !producersDone {
+		select {
+		case <-doneProducing:
+		case <-time.After(2 * time.Second):
+			t.Fatal("producers did not finish after all items were delivered")
+		}
 	}
 }
 
