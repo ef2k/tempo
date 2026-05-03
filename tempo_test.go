@@ -150,35 +150,35 @@ func TestNewDispatcherRejectsInvalidConfig(t *testing.T) {
 	})
 
 	t.Run("zero interval", func(t *testing.T) {
-		if _, err := NewDispatcher(&Config{Interval: 0, MaxBatchBytes: 10, MaxPendingBytes: 20}); err == nil {
+		if _, err := NewDispatcher(&Config{Interval: 0, MaxBatchBytes: 10, MaxBufferedBytes: 20}); err == nil {
 			t.Fatal("expected zero interval to be rejected")
 		}
 	})
 
 	t.Run("negative interval", func(t *testing.T) {
-		if _, err := NewDispatcher(&Config{Interval: -1 * time.Second, MaxBatchBytes: 10, MaxPendingBytes: 20}); err == nil {
+		if _, err := NewDispatcher(&Config{Interval: -1 * time.Second, MaxBatchBytes: 10, MaxBufferedBytes: 20}); err == nil {
 			t.Fatal("expected negative interval to be rejected")
 		}
 	})
 
 	t.Run("negative max batch bytes", func(t *testing.T) {
-		if _, err := NewDispatcher(&Config{Interval: time.Second, MaxBatchBytes: -1, MaxPendingBytes: 20}); err == nil {
+		if _, err := NewDispatcher(&Config{Interval: time.Second, MaxBatchBytes: -1, MaxBufferedBytes: 20}); err == nil {
 			t.Fatal("expected negative max batch bytes to be rejected")
 		}
 	})
 
-	t.Run("zero max pending bytes", func(t *testing.T) {
-		if _, err := NewDispatcher(&Config{Interval: time.Second, MaxBatchBytes: 10, MaxPendingBytes: 0}); err == nil {
-			t.Fatal("expected zero max pending bytes to be rejected")
+	t.Run("zero max buffered bytes", func(t *testing.T) {
+		if _, err := NewDispatcher(&Config{Interval: time.Second, MaxBatchBytes: 10, MaxBufferedBytes: 0}); err == nil {
+			t.Fatal("expected zero max buffered bytes to be rejected")
 		}
 	})
 }
 
 func TestNewDispatcherAcceptsValidConfig(t *testing.T) {
 	d, err := NewDispatcher(&Config{
-		Interval:        time.Second,
-		MaxBatchBytes:   10,
-		MaxPendingBytes: 100,
+		Interval:         time.Second,
+		MaxBatchBytes:    10,
+		MaxBufferedBytes: 100,
 	})
 	if err != nil {
 		t.Fatalf("expected valid config to succeed, got %v", err)
@@ -188,9 +188,9 @@ func TestNewDispatcherAcceptsValidConfig(t *testing.T) {
 	}
 
 	d2, err := NewDispatcher(&Config{
-		Interval:        time.Second,
-		MaxBatchBytes:   0,
-		MaxPendingBytes: 100,
+		Interval:         time.Second,
+		MaxBatchBytes:    0,
+		MaxBufferedBytes: 100,
 	})
 	if err != nil {
 		t.Fatalf("expected config without batch shaping to succeed, got %v", err)
@@ -202,9 +202,9 @@ func TestNewDispatcherAcceptsValidConfig(t *testing.T) {
 
 func TestDispatchOrder(t *testing.T) {
 	d := newDispatcher(t, &Config{
-		Interval:        time.Second,
-		MaxBatchBytes:   16 * KiB,
-		MaxPendingBytes: 2 * MiB,
+		Interval:         time.Second,
+		MaxBatchBytes:    16 * KiB,
+		MaxBufferedBytes: 2 * MiB,
 	})
 	defer d.Stop()
 	go d.Start()
@@ -254,9 +254,9 @@ L:
 
 func TestFlushesImmediatelyWhenBatchBytesAreFull(t *testing.T) {
 	d := newDispatcher(t, &Config{
-		Interval:        time.Hour,
-		MaxBatchBytes:   int64(len("first") + len("second")),
-		MaxPendingBytes: 128,
+		Interval:         time.Hour,
+		MaxBatchBytes:    int64(len("first") + len("second")),
+		MaxBufferedBytes: 128,
 	})
 	go d.Start()
 	t.Cleanup(func() {
@@ -274,9 +274,9 @@ func TestFlushesImmediatelyWhenBatchBytesAreFull(t *testing.T) {
 
 func TestFlushesPendingItemsWhenIntervalElapses(t *testing.T) {
 	d := newDispatcher(t, &Config{
-		Interval:        50 * time.Millisecond,
-		MaxBatchBytes:   1 * KiB,
-		MaxPendingBytes: 8 * KiB,
+		Interval:         50 * time.Millisecond,
+		MaxBatchBytes:    1 * KiB,
+		MaxBufferedBytes: 8 * KiB,
 	})
 	go d.Start()
 	t.Cleanup(func() {
@@ -293,9 +293,9 @@ func TestFlushesPendingItemsWhenIntervalElapses(t *testing.T) {
 
 func TestPreservesSequentialOrderWithinBatch(t *testing.T) {
 	d := newDispatcher(t, &Config{
-		Interval:        50 * time.Millisecond,
-		MaxBatchBytes:   1 * KiB,
-		MaxPendingBytes: 8 * KiB,
+		Interval:         50 * time.Millisecond,
+		MaxBatchBytes:    1 * KiB,
+		MaxBufferedBytes: 8 * KiB,
 	})
 	go d.Start()
 	t.Cleanup(func() {
@@ -314,9 +314,9 @@ func TestPreservesSequentialOrderWithinBatch(t *testing.T) {
 
 func TestBlockedBatchConsumerTrapsDispatcher(t *testing.T) {
 	d := newDispatcher(t, &Config{
-		Interval:        time.Hour,
-		MaxBatchBytes:   1,
-		MaxPendingBytes: 8,
+		Interval:         time.Hour,
+		MaxBatchBytes:    1,
+		MaxBufferedBytes: 8,
 	})
 	go d.Start()
 
@@ -355,9 +355,9 @@ func TestBlockedBatchConsumerTrapsDispatcher(t *testing.T) {
 
 func TestStopReturnsPromptlyWithoutDrainingBufferedItems(t *testing.T) {
 	d := newDispatcher(t, &Config{
-		Interval:        time.Hour,
-		MaxBatchBytes:   1 * KiB,
-		MaxPendingBytes: 8 * KiB,
+		Interval:         time.Hour,
+		MaxBatchBytes:    1 * KiB,
+		MaxBufferedBytes: 8 * KiB,
 	})
 	go d.Start()
 
@@ -367,9 +367,9 @@ func TestStopReturnsPromptlyWithoutDrainingBufferedItems(t *testing.T) {
 
 func TestStopDropsBufferedItems(t *testing.T) {
 	d := newDispatcher(t, &Config{
-		Interval:        time.Hour,
-		MaxBatchBytes:   1 * KiB,
-		MaxPendingBytes: 8 * KiB,
+		Interval:         time.Hour,
+		MaxBatchBytes:    1 * KiB,
+		MaxBufferedBytes: 8 * KiB,
 	})
 	go d.Start()
 
@@ -385,9 +385,9 @@ func TestStopDropsBufferedItems(t *testing.T) {
 
 func TestShutdownFlushesBufferedItemsBeforeReturning(t *testing.T) {
 	d := newDispatcher(t, &Config{
-		Interval:        time.Hour,
-		MaxBatchBytes:   1 * KiB,
-		MaxPendingBytes: 8 * KiB,
+		Interval:         time.Hour,
+		MaxBatchBytes:    1 * KiB,
+		MaxBufferedBytes: 8 * KiB,
 	})
 	go d.Start()
 
@@ -423,9 +423,9 @@ func TestShutdownFlushesBufferedItemsBeforeReturning(t *testing.T) {
 
 func TestShutdownReturnsContextErrorWhenDrainCannotComplete(t *testing.T) {
 	d := newDispatcher(t, &Config{
-		Interval:        time.Hour,
-		MaxBatchBytes:   1,
-		MaxPendingBytes: 8,
+		Interval:         time.Hour,
+		MaxBatchBytes:    1,
+		MaxBufferedBytes: 8,
 	})
 	go d.Start()
 
@@ -445,9 +445,9 @@ func TestShutdownReturnsContextErrorWhenDrainCannotComplete(t *testing.T) {
 
 func TestEnqueueAcceptsItemsWhileRunning(t *testing.T) {
 	d := newDispatcher(t, &Config{
-		Interval:        50 * time.Millisecond,
-		MaxBatchBytes:   1 * KiB,
-		MaxPendingBytes: 8 * KiB,
+		Interval:         50 * time.Millisecond,
+		MaxBatchBytes:    1 * KiB,
+		MaxBufferedBytes: 8 * KiB,
 	})
 	go d.Start()
 	t.Cleanup(func() {
@@ -466,9 +466,9 @@ func TestEnqueueAcceptsItemsWhileRunning(t *testing.T) {
 
 func TestEnqueueCopiesPayload(t *testing.T) {
 	d := newDispatcher(t, &Config{
-		Interval:        50 * time.Millisecond,
-		MaxBatchBytes:   1 * KiB,
-		MaxPendingBytes: 8 * KiB,
+		Interval:         50 * time.Millisecond,
+		MaxBatchBytes:    1 * KiB,
+		MaxBufferedBytes: 8 * KiB,
 	})
 	go d.Start()
 	t.Cleanup(func() {
@@ -489,9 +489,9 @@ func TestEnqueueCopiesPayload(t *testing.T) {
 
 func TestEnqueueReturnsErrorAfterStop(t *testing.T) {
 	d := newDispatcher(t, &Config{
-		Interval:        time.Hour,
-		MaxBatchBytes:   1 * KiB,
-		MaxPendingBytes: 8 * KiB,
+		Interval:         time.Hour,
+		MaxBatchBytes:    1 * KiB,
+		MaxBufferedBytes: 8 * KiB,
 	})
 	go d.Start()
 
@@ -504,9 +504,9 @@ func TestEnqueueReturnsErrorAfterStop(t *testing.T) {
 
 func TestEnqueueReturnsErrorAfterShutdownBegins(t *testing.T) {
 	d := newDispatcher(t, &Config{
-		Interval:        time.Hour,
-		MaxBatchBytes:   1 * KiB,
-		MaxPendingBytes: 8 * KiB,
+		Interval:         time.Hour,
+		MaxBatchBytes:    1 * KiB,
+		MaxBufferedBytes: 8 * KiB,
 	})
 	go d.Start()
 
@@ -548,9 +548,9 @@ func TestEnqueueReturnsErrorAfterShutdownBegins(t *testing.T) {
 
 func TestEnqueueReturnsQueueFullAtPendingLimit(t *testing.T) {
 	d := newDispatcher(t, &Config{
-		Interval:        time.Hour,
-		MaxBatchBytes:   1,
-		MaxPendingBytes: 2,
+		Interval:         time.Hour,
+		MaxBatchBytes:    1,
+		MaxBufferedBytes: 2,
 	})
 	go d.Start()
 
@@ -576,9 +576,9 @@ func TestEnqueueReturnsQueueFullAtPendingLimit(t *testing.T) {
 
 func TestEnqueueSucceedsAgainAfterPendingLimitDrains(t *testing.T) {
 	d := newDispatcher(t, &Config{
-		Interval:        time.Hour,
-		MaxBatchBytes:   1,
-		MaxPendingBytes: 2,
+		Interval:         time.Hour,
+		MaxBatchBytes:    1,
+		MaxBufferedBytes: 2,
 	})
 	go d.Start()
 	t.Cleanup(func() {
@@ -616,9 +616,9 @@ func TestEnqueueSucceedsAgainAfterPendingLimitDrains(t *testing.T) {
 
 func TestEnqueueAllowsPayloadLargerThanBatchLimitAndRejectsPendingOverflow(t *testing.T) {
 	d := newDispatcher(t, &Config{
-		Interval:        time.Hour,
-		MaxBatchBytes:   4,
-		MaxPendingBytes: 8,
+		Interval:         time.Hour,
+		MaxBatchBytes:    4,
+		MaxBufferedBytes: 8,
 	})
 	go d.Start()
 	t.Cleanup(func() {
@@ -638,9 +638,9 @@ func TestEnqueueAllowsPayloadLargerThanBatchLimitAndRejectsPendingOverflow(t *te
 	}
 
 	d2 := newDispatcher(t, &Config{
-		Interval:        time.Hour,
-		MaxBatchBytes:   8,
-		MaxPendingBytes: 4,
+		Interval:         time.Hour,
+		MaxBatchBytes:    8,
+		MaxBufferedBytes: 4,
 	})
 	go d2.Start()
 	t.Cleanup(func() {
@@ -654,9 +654,9 @@ func TestEnqueueAllowsPayloadLargerThanBatchLimitAndRejectsPendingOverflow(t *te
 
 func TestEnqueueReturnsQueueFullWhenPayloadWouldFitEventuallyButNotNow(t *testing.T) {
 	d := newDispatcher(t, &Config{
-		Interval:        20 * time.Millisecond,
-		MaxBatchBytes:   0,
-		MaxPendingBytes: 8,
+		Interval:         20 * time.Millisecond,
+		MaxBatchBytes:    0,
+		MaxBufferedBytes: 8,
 	})
 	go d.Start()
 	t.Cleanup(func() {
@@ -682,9 +682,9 @@ func TestEnqueueReturnsQueueFullWhenPayloadWouldFitEventuallyButNotNow(t *testin
 
 func TestFlushesBeforeAppendingPayloadThatWouldOverflowBatch(t *testing.T) {
 	d := newDispatcher(t, &Config{
-		Interval:        50 * time.Millisecond,
-		MaxBatchBytes:   5,
-		MaxPendingBytes: 32,
+		Interval:         50 * time.Millisecond,
+		MaxBatchBytes:    5,
+		MaxBufferedBytes: 32,
 	})
 	go d.Start()
 	t.Cleanup(func() {
@@ -714,9 +714,9 @@ func TestFlushesBeforeAppendingPayloadThatWouldOverflowBatch(t *testing.T) {
 
 func TestBatchByteLimitBoundsEmittedBatchSize(t *testing.T) {
 	d := newDispatcher(t, &Config{
-		Interval:        100 * time.Millisecond,
-		MaxBatchBytes:   4,
-		MaxPendingBytes: 32,
+		Interval:         100 * time.Millisecond,
+		MaxBatchBytes:    4,
+		MaxBufferedBytes: 32,
 	})
 	go d.Start()
 	t.Cleanup(func() {
@@ -742,9 +742,9 @@ func TestBatchByteLimitBoundsEmittedBatchSize(t *testing.T) {
 
 func TestFlushesByIntervalWhenBatchShapingIsDisabled(t *testing.T) {
 	d := newDispatcher(t, &Config{
-		Interval:        20 * time.Millisecond,
-		MaxBatchBytes:   0,
-		MaxPendingBytes: 64,
+		Interval:         20 * time.Millisecond,
+		MaxBatchBytes:    0,
+		MaxBufferedBytes: 64,
 	})
 	go d.Start()
 	t.Cleanup(func() {
@@ -766,9 +766,9 @@ func TestFlushesByIntervalWhenBatchShapingIsDisabled(t *testing.T) {
 
 func TestSinglePayloadMayExceedBatchByteLimitWhenItFitsPendingLimit(t *testing.T) {
 	d := newDispatcher(t, &Config{
-		Interval:        time.Hour,
-		MaxBatchBytes:   4,
-		MaxPendingBytes: 32,
+		Interval:         time.Hour,
+		MaxBatchBytes:    4,
+		MaxBufferedBytes: 32,
 	})
 	go d.Start()
 	t.Cleanup(func() {
@@ -790,9 +790,9 @@ func TestSinglePayloadMayExceedBatchByteLimitWhenItFitsPendingLimit(t *testing.T
 
 func TestBatchesExposesReadOnlyOutputStream(t *testing.T) {
 	d := newDispatcher(t, &Config{
-		Interval:        50 * time.Millisecond,
-		MaxBatchBytes:   1 * KiB,
-		MaxPendingBytes: 8 * KiB,
+		Interval:         50 * time.Millisecond,
+		MaxBatchBytes:    1 * KiB,
+		MaxBufferedBytes: 8 * KiB,
 	})
 	go d.Start()
 	t.Cleanup(func() {
@@ -811,9 +811,9 @@ func TestBatchesExposesReadOnlyOutputStream(t *testing.T) {
 
 func TestMethodBasedUsagePreservesBatchingBehavior(t *testing.T) {
 	d := newDispatcher(t, &Config{
-		Interval:        time.Hour,
-		MaxBatchBytes:   int64(len("first") + len("second")),
-		MaxPendingBytes: 8 * KiB,
+		Interval:         time.Hour,
+		MaxBatchBytes:    int64(len("first") + len("second")),
+		MaxBufferedBytes: 8 * KiB,
 	})
 	go d.Start()
 	t.Cleanup(func() {
@@ -835,9 +835,9 @@ func TestMethodBasedUsagePreservesBatchingBehavior(t *testing.T) {
 
 func TestStopIsSafeToCallMoreThanOnce(t *testing.T) {
 	d := newDispatcher(t, &Config{
-		Interval:        time.Hour,
-		MaxBatchBytes:   1 * KiB,
-		MaxPendingBytes: 8 * KiB,
+		Interval:         time.Hour,
+		MaxBatchBytes:    1 * KiB,
+		MaxBufferedBytes: 8 * KiB,
 	})
 	go d.Start()
 
@@ -847,9 +847,9 @@ func TestStopIsSafeToCallMoreThanOnce(t *testing.T) {
 
 func TestShutdownIsSafeToCallMoreThanOnce(t *testing.T) {
 	d := newDispatcher(t, &Config{
-		Interval:        time.Hour,
-		MaxBatchBytes:   1 * KiB,
-		MaxPendingBytes: 8 * KiB,
+		Interval:         time.Hour,
+		MaxBatchBytes:    1 * KiB,
+		MaxBufferedBytes: 8 * KiB,
 	})
 	go d.Start()
 
@@ -885,9 +885,9 @@ func TestShutdownIsSafeToCallMoreThanOnce(t *testing.T) {
 
 func TestStopAfterShutdownBeginsDoesNotHang(t *testing.T) {
 	d := newDispatcher(t, &Config{
-		Interval:        time.Hour,
-		MaxBatchBytes:   1 * KiB,
-		MaxPendingBytes: 8 * KiB,
+		Interval:         time.Hour,
+		MaxBatchBytes:    1 * KiB,
+		MaxBufferedBytes: 8 * KiB,
 	})
 	go d.Start()
 

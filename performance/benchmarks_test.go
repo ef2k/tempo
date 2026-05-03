@@ -269,9 +269,9 @@ func BenchmarkSlowConsumerBackpressure(b *testing.B) {
 
 func BenchmarkIntervalDrivenBatching(b *testing.B) {
 	d, _, delivered, batches := newBenchDispatcher(b, &tempo.Config{
-		Interval:        200 * time.Microsecond,
-		MaxBatchBytes:   1 * tempo.GiB,
-		MaxPendingBytes: 1 * tempo.GiB,
+		Interval:         200 * time.Microsecond,
+		MaxBatchBytes:    1 * tempo.GiB,
+		MaxBufferedBytes: 1 * tempo.GiB,
 	}, benchDrainOptions{})
 
 	b.ReportAllocs()

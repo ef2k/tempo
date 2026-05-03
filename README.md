@@ -28,19 +28,19 @@ Tempo is byte-oriented:
 
 - `Enqueue` accepts `[]byte`
 - batches are emitted as `[][]byte`
-- `MaxPendingBytes` bounds payload bytes owned by Tempo
+- `MaxBufferedBytes` bounds payload bytes owned by Tempo
 - `Interval` bounds latency for partial batches
 - `MaxBatchBytes` is an optional shaping lever for work per dispatch
 
 If a single payload is larger than `MaxBatchBytes` but still fits within
-`MaxPendingBytes`, Tempo accepts it and flushes it as a one-item batch. Only
-payloads that exceed `MaxPendingBytes` are rejected.
+`MaxBufferedBytes`, Tempo accepts it and flushes it as a one-item batch. Only
+payloads that exceed `MaxBufferedBytes` are rejected.
 
 Admission is based on both total fit and current free space:
 
-- if a payload is larger than `MaxPendingBytes`, it is rejected with
+- if a payload is larger than `MaxBufferedBytes`, it is rejected with
   `ErrPayloadTooLarge`
-- if a payload would fit within `MaxPendingBytes` in principle, but there is
+- if a payload would fit within `MaxBufferedBytes` in principle, but there is
   not enough pending space available right now, it is rejected with
   `ErrQueueFull`
 
@@ -68,7 +68,7 @@ go get github.com/ef2k/tempo
 d, err := tempo.NewDispatcher(&tempo.Config{
     Interval:        30 * time.Second,
     MaxBatchBytes:   10 * tempo.MiB,
-    MaxPendingBytes: 500 * tempo.MiB,
+    MaxBufferedBytes: 500 * tempo.MiB,
 })
 ```
 
@@ -79,7 +79,7 @@ This means:
 - never let Tempo own more than 500 MiB of payload data
 
 If you do not need batch-size shaping, you can leave `MaxBatchBytes` unset and
-let Tempo flush by `Interval` while `MaxPendingBytes` remains the hard safety
+let Tempo flush by `Interval` while `MaxBufferedBytes` remains the hard safety
 boundary.
 
 

@@ -13,9 +13,9 @@ func main() {
 	log.SetFlags(log.Lmicroseconds)
 
 	d, err := tempo.NewDispatcher(&tempo.Config{
-		Interval:        3 * time.Second,
-		MaxBatchBytes:   64 * tempo.KiB,
-		MaxPendingBytes: 8 * tempo.MiB,
+		Interval:         3 * time.Second,
+		MaxBatchBytes:    64 * tempo.KiB,
+		MaxBufferedBytes: 8 * tempo.MiB,
 	})
 	if err != nil {
 		log.Fatalf("new dispatcher: %v", err)
@@ -31,7 +31,7 @@ func main() {
 	log.Printf("  ---")
 	log.Printf("  tempo interval:         %s", d.Interval)
 	log.Printf("  tempo max batch bytes:  %d", d.MaxBatchBytes)
-	log.Printf("  tempo max pending:      %d", d.MaxPendingBytes)
+	log.Printf("  tempo max buffered:      %d", d.MaxBufferedBytes)
 	log.Printf("  ---")
 	log.Printf("  producer items:        %d", expectedItems)
 	log.Printf("  producer goroutines:   %d", numGoroutines)

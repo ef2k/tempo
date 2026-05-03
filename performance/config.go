@@ -12,7 +12,7 @@ import (
 	tempo "github.com/ef2k/tempo"
 )
 
-const benchmarkMaxPendingBytes = 1 * tempo.GiB
+const benchmarkMaxBufferedBytes = 1 * tempo.GiB
 const syntheticBenchPayloadBytes int64 = 7
 
 type performanceSettings struct {
@@ -38,19 +38,19 @@ type benchmarkDefaultsSettings struct {
 
 type stressDefaultsSettings struct {
 	MaxBatchBytes    int64  `json:"max_batch_bytes"`
-	MaxPendingBytes  int64  `json:"max_pending_bytes"`
+	MaxBufferedBytes int64  `json:"max_pending_bytes"`
 	Interval         string `json:"interval"`
 	NumProducers     int    `json:"num_producers"`
 	ItemsPerProducer int    `json:"items_per_producer"`
 }
 
 type soakDefaultsSettings struct {
-	Interval        string `json:"interval"`
-	MaxBatchBytes   int64  `json:"max_batch_bytes"`
-	MaxPendingBytes int64  `json:"max_pending_bytes"`
-	ConsumerDelay   string `json:"consumer_delay"`
-	NumProducers    int    `json:"num_producers"`
-	Duration        string `json:"duration"`
+	Interval         string `json:"interval"`
+	MaxBatchBytes    int64  `json:"max_batch_bytes"`
+	MaxBufferedBytes int64  `json:"max_pending_bytes"`
+	ConsumerDelay    string `json:"consumer_delay"`
+	NumProducers     int    `json:"num_producers"`
+	Duration         string `json:"duration"`
 }
 
 type tuneDefaultsSettings struct {
@@ -127,7 +127,7 @@ func WriteTunedSettings(delay time.Duration, cfg tempo.Config) (string, error) {
 
 	settings.SoakDefaults.ConsumerDelay = delay.String()
 	settings.SoakDefaults.MaxBatchBytes = cfg.MaxBatchBytes
-	settings.SoakDefaults.MaxPendingBytes = cfg.MaxPendingBytes
+	settings.SoakDefaults.MaxBufferedBytes = cfg.MaxBufferedBytes
 	settings.SoakDefaults.Interval = cfg.Interval.String()
 	settings.TuneDefaults.ConsumerDelay = delay.String()
 
@@ -160,18 +160,18 @@ func defaultPerformanceSettings() performanceSettings {
 		},
 		StressDefaults: stressDefaultsSettings{
 			MaxBatchBytes:    256 * syntheticBenchPayloadBytes,
-			MaxPendingBytes:  1 * tempo.GiB,
+			MaxBufferedBytes: 1 * tempo.GiB,
 			Interval:         time.Hour.String(),
 			NumProducers:     256,
 			ItemsPerProducer: 2000,
 		},
 		SoakDefaults: soakDefaultsSettings{
-			Interval:        (10 * time.Millisecond).String(),
-			MaxBatchBytes:   32 * tempo.KiB,
-			MaxPendingBytes: 64 * tempo.MiB,
-			ConsumerDelay:   (200 * time.Microsecond).String(),
-			NumProducers:    32,
-			Duration:        (5 * time.Minute).String(),
+			Interval:         (10 * time.Millisecond).String(),
+			MaxBatchBytes:    32 * tempo.KiB,
+			MaxBufferedBytes: 64 * tempo.MiB,
+			ConsumerDelay:    (200 * time.Microsecond).String(),
+			NumProducers:     32,
+			Duration:         (5 * time.Minute).String(),
 		},
 		TuneDefaults: tuneDefaultsSettings{
 			Duration:       (15 * time.Second).String(),
@@ -199,9 +199,9 @@ func benchmarkConfig(maxBatchBytes int64) *tempo.Config {
 
 func benchmarkConfigWithInterval(maxBatchBytes int64, interval time.Duration) *tempo.Config {
 	return &tempo.Config{
-		Interval:        interval,
-		MaxBatchBytes:   maxBatchBytes,
-		MaxPendingBytes: benchmarkMaxPendingBytes,
+		Interval:         interval,
+		MaxBatchBytes:    maxBatchBytes,
+		MaxBufferedBytes: benchmarkMaxBufferedBytes,
 	}
 }
 
@@ -212,16 +212,16 @@ func SoakDefaultConfig() tempo.Config {
 		interval = 10 * time.Millisecond
 	}
 	return tempo.Config{
-		Interval:        interval,
-		MaxBatchBytes:   cfg.SoakDefaults.MaxBatchBytes,
-		MaxPendingBytes: cfg.SoakDefaults.MaxPendingBytes,
+		Interval:         interval,
+		MaxBatchBytes:    cfg.SoakDefaults.MaxBatchBytes,
+		MaxBufferedBytes: cfg.SoakDefaults.MaxBufferedBytes,
 	}
 }
 
-func SoakConfigFor(maxBatchBytes, maxPendingBytes int64) tempo.Config {
+func SoakConfigFor(maxBatchBytes, maxBufferedBytes int64) tempo.Config {
 	cfg := SoakDefaultConfig()
 	cfg.MaxBatchBytes = maxBatchBytes
-	cfg.MaxPendingBytes = maxPendingBytes
+	cfg.MaxBufferedBytes = maxBufferedBytes
 	return cfg
 }
 
@@ -357,14 +357,14 @@ func StressDefaultConfig() tempo.Config {
 	if maxBatchBytes <= 0 {
 		maxBatchBytes = 256 * syntheticBenchPayloadBytes
 	}
-	maxPendingBytes := cfg.StressDefaults.MaxPendingBytes
+	maxPendingBytes := cfg.StressDefaults.MaxBufferedBytes
 	if maxPendingBytes <= 0 {
 		maxPendingBytes = 1 * tempo.GiB
 	}
 	return tempo.Config{
-		Interval:        interval,
-		MaxBatchBytes:   maxBatchBytes,
-		MaxPendingBytes: maxPendingBytes,
+		Interval:         interval,
+		MaxBatchBytes:    maxBatchBytes,
+		MaxBufferedBytes: maxPendingBytes,
 	}
 }
 

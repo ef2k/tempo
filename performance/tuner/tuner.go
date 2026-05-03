@@ -32,9 +32,9 @@ type Options struct {
 }
 
 type Candidate struct {
-	ConsumerDelay   time.Duration
-	MaxBatchBytes   int64
-	MaxPendingBytes int64
+	ConsumerDelay    time.Duration
+	MaxBatchBytes    int64
+	MaxBufferedBytes int64
 }
 
 type Recommendation struct {
@@ -110,9 +110,9 @@ func Tune(ctx context.Context, opts Options) (Recommendation, error) {
 					continue
 				}
 				candidates = append(candidates, Candidate{
-					ConsumerDelay:   delay,
-					MaxBatchBytes:   batch,
-					MaxPendingBytes: pending,
+					ConsumerDelay:    delay,
+					MaxBatchBytes:    batch,
+					MaxBufferedBytes: pending,
 				})
 			}
 		}
@@ -164,12 +164,12 @@ func runSoak(ctx context.Context, opts Options, candidate Candidate) (RunResult,
 		"TEMPO_SOAK_DURATION="+opts.SoakDuration.String(),
 		"TEMPO_SOAK_CONSUMER_DELAY="+candidate.ConsumerDelay.String(),
 		"TEMPO_SOAK_MAX_BATCH_BYTES="+strconv.FormatInt(candidate.MaxBatchBytes, 10),
-		"TEMPO_SOAK_MAX_PENDING_BYTES="+strconv.FormatInt(candidate.MaxPendingBytes, 10),
+		"TEMPO_SOAK_MAX_PENDING_BYTES="+strconv.FormatInt(candidate.MaxBufferedBytes, 10),
 		"TEMPO_SOAK_OUT_DIR="+outDir,
 	)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
-		return RunResult{}, fmt.Errorf("run soak for delay=%s batch=%d pending=%d: %w\n%s", candidate.ConsumerDelay, candidate.MaxBatchBytes, candidate.MaxPendingBytes, err, output)
+		return RunResult{}, fmt.Errorf("run soak for delay=%s batch=%d pending=%d: %w\n%s", candidate.ConsumerDelay, candidate.MaxBatchBytes, candidate.MaxBufferedBytes, err, output)
 	}
 
 	matches, err := filepath.Glob(filepath.Join(outDir, "*-results.json"))

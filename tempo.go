@@ -14,8 +14,8 @@ var (
 	ErrNilConfig        = errors.New("tempo: nil config")
 	ErrBadInterval      = errors.New("tempo: interval must be greater than zero")
 	ErrBadMaxBatchBytes = errors.New("tempo: max batch bytes must not be negative")
-	ErrBadMaxPending    = errors.New("tempo: max pending bytes must be greater than zero")
-	ErrPayloadTooLarge  = errors.New("tempo: payload exceeds configured pending byte limit")
+	ErrBadMaxBuffered   = errors.New("tempo: max buffered bytes must be greater than zero")
+	ErrPayloadTooLarge  = errors.New("tempo: payload exceeds configured buffered byte limit")
 )
 
 const (
@@ -44,9 +44,9 @@ type queuedBatch struct {
 
 // Config configures interval-based flushing and byte-oriented queue limits.
 type Config struct {
-	Interval        time.Duration
-	MaxBatchBytes   int64
-	MaxPendingBytes int64
+	Interval         time.Duration
+	MaxBatchBytes    int64 // optional
+	MaxBufferedBytes int64
 }
 
 // NewDispatcher returns an initialized instance of Dispatcher.
@@ -60,38 +60,38 @@ func NewDispatcher(c *Config) (*Dispatcher, error) {
 	if c.MaxBatchBytes < 0 {
 		return nil, ErrBadMaxBatchBytes
 	}
-	if c.MaxPendingBytes <= 0 {
-		return nil, ErrBadMaxPending
+	if c.MaxBufferedBytes <= 0 {
+		return nil, ErrBadMaxBuffered
 	}
 
 	return &Dispatcher{
-		stop:            make(chan struct{}, 1),
-		shutdown:        make(chan shutdownRequest, 1),
-		closing:         make(chan struct{}),
-		Q:               make(chan []byte),
-		Batch:           make(chan [][]byte),
-		Interval:        c.Interval,
-		MaxBatchBytes:   c.MaxBatchBytes,
-		MaxPendingBytes: c.MaxPendingBytes,
+		stop:             make(chan struct{}, 1),
+		shutdown:         make(chan shutdownRequest, 1),
+		closing:          make(chan struct{}),
+		Q:                make(chan []byte),
+		Batch:            make(chan [][]byte),
+		Interval:         c.Interval,
+		MaxBatchBytes:    c.MaxBatchBytes,
+		MaxBufferedBytes: c.MaxBufferedBytes,
 	}, nil
 }
 
 // Dispatcher coordinates dispatching of queued payloads by time interval
 // or, when configured, when the preferred batch byte target is met.
 type Dispatcher struct {
-	mu              sync.RWMutex
-	admitMu         sync.Mutex
-	state           state
-	stop            chan struct{}
-	shutdown        chan shutdownRequest
-	closing         chan struct{}
-	closeOnce       sync.Once
-	pendingBytes    int64
-	Q               chan []byte
-	Batch           chan [][]byte
-	Interval        time.Duration
-	MaxBatchBytes   int64
-	MaxPendingBytes int64
+	mu               sync.RWMutex
+	admitMu          sync.Mutex
+	state            state
+	stop             chan struct{}
+	shutdown         chan shutdownRequest
+	closing          chan struct{}
+	closeOnce        sync.Once
+	pendingBytes     int64
+	Q                chan []byte
+	Batch            chan [][]byte
+	Interval         time.Duration
+	MaxBatchBytes    int64
+	MaxBufferedBytes int64
 }
 
 // Start begins payload dispatching.
@@ -272,7 +272,7 @@ func (d *Dispatcher) Enqueue(v []byte) error {
 	}
 
 	size := int64(len(v))
-	if size > d.MaxPendingBytes {
+	if size > d.MaxBufferedBytes {
 		return ErrPayloadTooLarge
 	}
 
@@ -340,7 +340,7 @@ func (d *Dispatcher) reservePendingBytes(n int64) error {
 	d.admitMu.Lock()
 	defer d.admitMu.Unlock()
 
-	if d.pendingBytes+n > d.MaxPendingBytes {
+	if d.pendingBytes+n > d.MaxBufferedBytes {
 		return ErrQueueFull
 	}
 	d.pendingBytes += n

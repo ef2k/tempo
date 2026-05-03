@@ -135,12 +135,12 @@ type soakEnvironment struct {
 }
 
 type soakConfig struct {
-	Interval        string `json:"interval"`
-	MaxBatchBytes   int64  `json:"max_batch_bytes"`
-	MaxPendingBytes int64  `json:"max_pending_bytes"`
-	NumProducers    int    `json:"num_producers"`
-	ConsumerDelay   string `json:"consumer_delay"`
-	DrainTimeout    string `json:"drain_timeout"`
+	Interval         string `json:"interval"`
+	MaxBatchBytes    int64  `json:"max_batch_bytes"`
+	MaxBufferedBytes int64  `json:"max_pending_bytes"`
+	NumProducers     int    `json:"num_producers"`
+	ConsumerDelay    string `json:"consumer_delay"`
+	DrainTimeout     string `json:"drain_timeout"`
 }
 
 type assessmentStatus string
@@ -480,7 +480,7 @@ func makeAssessment(snapshot soakSnapshot, samples []soakSample, startGoroutines
 	}
 
 	backlog := soakAssessmentSection{Status: assessmentPass}
-	backlogWarnThreshold := snapshot.Config.MaxPendingBytes / benchPayloadBytes()
+	backlogWarnThreshold := snapshot.Config.MaxBufferedBytes / benchPayloadBytes()
 	if backlogWarnThreshold < 1 {
 		backlogWarnThreshold = 1
 	}
@@ -492,12 +492,12 @@ func makeAssessment(snapshot soakSnapshot, samples []soakSample, startGoroutines
 	}
 	backlog.Notes = []string{
 		fmt.Sprintf("peak backlog=%d", snapshot.PeakBacklog),
-		fmt.Sprintf("max pending bytes=%d", snapshot.Config.MaxPendingBytes),
+		fmt.Sprintf("max buffered bytes=%d", snapshot.Config.MaxBufferedBytes),
 	}
 
 	memory := soakAssessmentSection{Status: assessmentPass}
-	memoryFailThreshold := uint64(snapshot.Config.MaxPendingBytes * 6)
-	memoryWarnThreshold := uint64(snapshot.Config.MaxPendingBytes * 4)
+	memoryFailThreshold := uint64(snapshot.Config.MaxBufferedBytes * 6)
+	memoryWarnThreshold := uint64(snapshot.Config.MaxBufferedBytes * 4)
 	switch {
 	case snapshot.PeakHeapAllocBytes > memoryFailThreshold:
 		memory.Status = assessmentFail
@@ -766,7 +766,7 @@ func TestSoakSustainedLoadStaysHealthy(t *testing.T) {
 		if err != nil {
 			t.Fatalf("parse TEMPO_SOAK_MAX_PENDING_BYTES: %v", err)
 		}
-		config.MaxPendingBytes = parsed
+		config.MaxBufferedBytes = parsed
 	}
 	consumerDelay := SoakDefaultConsumerDelay()
 	if raw := os.Getenv("TEMPO_SOAK_CONSUMER_DELAY"); raw != "" {
@@ -791,12 +791,12 @@ func TestSoakSustainedLoadStaysHealthy(t *testing.T) {
 		CPUCount:  runtime.NumCPU(),
 	}
 	runConfig := soakConfig{
-		Interval:        config.Interval.String(),
-		MaxBatchBytes:   config.MaxBatchBytes,
-		MaxPendingBytes: config.MaxPendingBytes,
-		NumProducers:    numProducers,
-		ConsumerDelay:   consumerDelay.String(),
-		DrainTimeout:    drainTimeout.String(),
+		Interval:         config.Interval.String(),
+		MaxBatchBytes:    config.MaxBatchBytes,
+		MaxBufferedBytes: config.MaxBufferedBytes,
+		NumProducers:     numProducers,
+		ConsumerDelay:    consumerDelay.String(),
+		DrainTimeout:     drainTimeout.String(),
 	}
 
 	d, err := tempo.NewDispatcher(&config)

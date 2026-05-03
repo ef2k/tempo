@@ -80,7 +80,7 @@ func main() {
 			"%-10s %-12s %-14s %-12.0f %-12s %-10d %-10s\n",
 			run.Candidate.ConsumerDelay.String(),
 			formatBytes(run.Candidate.MaxBatchBytes),
-			formatBytes(run.Candidate.MaxPendingBytes),
+			formatBytes(run.Candidate.MaxBufferedBytes),
 			run.AvgDeliveredItemsPerSec,
 			formatBytes(int64(run.PeakHeapAllocBytes)),
 			run.Rejected,
@@ -93,7 +93,7 @@ func main() {
 	fmt.Printf("recommended\n")
 	fmt.Printf("  ConsumerDelay:  %s\n", best.Candidate.ConsumerDelay)
 	fmt.Printf("  MaxBatchBytes:   %d // %s\n", best.Candidate.MaxBatchBytes, formatBytes(best.Candidate.MaxBatchBytes))
-	fmt.Printf("  MaxPendingBytes: %d // %s\n", best.Candidate.MaxPendingBytes, formatBytes(best.Candidate.MaxPendingBytes))
+	fmt.Printf("  MaxBufferedBytes: %d // %s\n", best.Candidate.MaxBufferedBytes, formatBytes(best.Candidate.MaxBufferedBytes))
 	fmt.Printf("  AvgDeliveredItemsPerSec: %.0f\n", best.AvgDeliveredItemsPerSec)
 	fmt.Printf("  PeakHeapAlloc: %s\n", formatBytes(int64(best.PeakHeapAllocBytes)))
 	fmt.Printf("  Rejected: %d\n", best.Rejected)
@@ -212,7 +212,7 @@ func maybeWriteSettings(best tuner.RunResult) {
 		return
 	}
 
-	path, err := performance.WriteTunedSettings(best.Candidate.ConsumerDelay, performance.SoakConfigFor(best.Candidate.MaxBatchBytes, best.Candidate.MaxPendingBytes))
+	path, err := performance.WriteTunedSettings(best.Candidate.ConsumerDelay, performance.SoakConfigFor(best.Candidate.MaxBatchBytes, best.Candidate.MaxBufferedBytes))
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "write settings: %v\n", err)
 		return
