@@ -13,7 +13,7 @@ var (
 	ErrQueueFull        = errors.New("tempo: dispatcher queue full")
 	ErrNilConfig        = errors.New("tempo: nil config")
 	ErrBadInterval      = errors.New("tempo: interval must be greater than zero")
-	ErrBadMaxBatchBytes = errors.New("tempo: max batch bytes must be greater than zero")
+	ErrBadMaxBatchBytes = errors.New("tempo: max batch bytes must not be negative")
 	ErrBadMaxPending    = errors.New("tempo: max pending bytes must be greater than zero")
 	ErrPayloadTooLarge  = errors.New("tempo: payload exceeds configured pending byte limit")
 )
@@ -57,7 +57,7 @@ func NewDispatcher(c *Config) (*Dispatcher, error) {
 	if c.Interval <= 0 {
 		return nil, ErrBadInterval
 	}
-	if c.MaxBatchBytes <= 0 {
+	if c.MaxBatchBytes < 0 {
 		return nil, ErrBadMaxBatchBytes
 	}
 	if c.MaxPendingBytes <= 0 {
@@ -77,7 +77,7 @@ func NewDispatcher(c *Config) (*Dispatcher, error) {
 }
 
 // Dispatcher coordinates dispatching of queued payloads by time interval
-// or when the batch byte limit is met.
+// or, when configured, when the preferred batch byte target is met.
 type Dispatcher struct {
 	mu              sync.RWMutex
 	admitMu         sync.Mutex
@@ -204,15 +204,16 @@ func (d *Dispatcher) Start() {
 			return
 		case m := <-in:
 			size := int64(len(m))
-			if len(batch) > 0 && batchBytes+size > d.MaxBatchBytes {
-				queueBatch()
-			}
 			if len(batch) == 0 {
+				startTimer()
+			}
+			if d.MaxBatchBytes > 0 && len(batch) > 0 && batchBytes+size > d.MaxBatchBytes {
+				queueBatch()
 				startTimer()
 			}
 			batch = append(batch, m)
 			batchBytes += size
-			if batchBytes >= d.MaxBatchBytes {
+			if d.MaxBatchBytes > 0 && batchBytes >= d.MaxBatchBytes {
 				queueBatch()
 			}
 		case <-timerTick:

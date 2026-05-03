@@ -161,12 +161,6 @@ func TestNewDispatcherRejectsInvalidConfig(t *testing.T) {
 		}
 	})
 
-	t.Run("zero max batch bytes", func(t *testing.T) {
-		if _, err := NewDispatcher(&Config{Interval: time.Second, MaxBatchBytes: 0, MaxPendingBytes: 20}); err == nil {
-			t.Fatal("expected zero max batch bytes to be rejected")
-		}
-	})
-
 	t.Run("negative max batch bytes", func(t *testing.T) {
 		if _, err := NewDispatcher(&Config{Interval: time.Second, MaxBatchBytes: -1, MaxPendingBytes: 20}); err == nil {
 			t.Fatal("expected negative max batch bytes to be rejected")
@@ -191,6 +185,18 @@ func TestNewDispatcherAcceptsValidConfig(t *testing.T) {
 	}
 	if d == nil {
 		t.Fatal("expected a dispatcher instance for valid config")
+	}
+
+	d2, err := NewDispatcher(&Config{
+		Interval:        time.Second,
+		MaxBatchBytes:   0,
+		MaxPendingBytes: 100,
+	})
+	if err != nil {
+		t.Fatalf("expected config without batch shaping to succeed, got %v", err)
+	}
+	if d2 == nil {
+		t.Fatal("expected a dispatcher instance when max batch bytes is unset")
 	}
 }
 
@@ -646,6 +652,34 @@ func TestEnqueueAllowsPayloadLargerThanBatchLimitAndRejectsPendingOverflow(t *te
 	}
 }
 
+func TestEnqueueReturnsQueueFullWhenPayloadWouldFitEventuallyButNotNow(t *testing.T) {
+	d := newDispatcher(t, &Config{
+		Interval:        20 * time.Millisecond,
+		MaxBatchBytes:   0,
+		MaxPendingBytes: 8,
+	})
+	go d.Start()
+	t.Cleanup(func() {
+		stopWithin(t, d, 2*time.Second)
+	})
+
+	if err := d.Enqueue(payload("12345")); err != nil {
+		t.Fatalf("expected first enqueue to succeed, got %v", err)
+	}
+	if err := d.Enqueue(payload("1234")); err != ErrQueueFull {
+		t.Fatalf("expected second enqueue to fail with ErrQueueFull when not enough pending space remains, got %v", err)
+	}
+
+	batch := receiveBatchWithin(t, d.Batches(), 200*time.Millisecond)
+	if got := batchStrings(batch); len(got) != 1 || got[0] != "12345" {
+		t.Fatalf("expected first drained batch to contain [12345], got %#v", got)
+	}
+
+	if err := d.Enqueue(payload("1234")); err != nil {
+		t.Fatalf("expected payload to succeed once pending space is available again, got %v", err)
+	}
+}
+
 func TestFlushesBeforeAppendingPayloadThatWouldOverflowBatch(t *testing.T) {
 	d := newDispatcher(t, &Config{
 		Interval:        50 * time.Millisecond,
@@ -703,6 +737,30 @@ func TestBatchByteLimitBoundsEmittedBatchSize(t *testing.T) {
 	second := receiveBatchWithin(t, d.Batches(), 300*time.Millisecond)
 	if got := totalBatchBytes(second); got > 4 {
 		t.Fatalf("expected second batch to stay within byte limit, got %d", got)
+	}
+}
+
+func TestFlushesByIntervalWhenBatchShapingIsDisabled(t *testing.T) {
+	d := newDispatcher(t, &Config{
+		Interval:        20 * time.Millisecond,
+		MaxBatchBytes:   0,
+		MaxPendingBytes: 64,
+	})
+	go d.Start()
+	t.Cleanup(func() {
+		stopWithin(t, d, 2*time.Second)
+	})
+
+	if err := d.Enqueue(payload("aa")); err != nil {
+		t.Fatalf("expected first enqueue to succeed, got %v", err)
+	}
+	if err := d.Enqueue(payload("bb")); err != nil {
+		t.Fatalf("expected second enqueue to succeed, got %v", err)
+	}
+
+	batch := receiveBatchWithin(t, d.Batches(), 200*time.Millisecond)
+	if got := batchStrings(batch); len(got) != 2 || got[0] != "aa" || got[1] != "bb" {
+		t.Fatalf("expected interval-driven batch [aa bb], got %#v", got)
 	}
 }
 
