@@ -608,7 +608,7 @@ func TestEnqueueSucceedsAgainAfterPendingLimitDrains(t *testing.T) {
 	}
 }
 
-func TestEnqueueRejectsPayloadLargerThanByteLimits(t *testing.T) {
+func TestEnqueueAllowsPayloadLargerThanBatchLimitAndRejectsPendingOverflow(t *testing.T) {
 	d := newDispatcher(t, &Config{
 		Interval:        time.Hour,
 		MaxBatchBytes:   4,
@@ -619,8 +619,16 @@ func TestEnqueueRejectsPayloadLargerThanByteLimits(t *testing.T) {
 		stopWithin(t, d, 2*time.Second)
 	})
 
-	if err := d.Enqueue(payload("12345")); err != ErrPayloadTooLarge {
-		t.Fatalf("expected oversized payload to be rejected by batch limit, got %v", err)
+	if err := d.Enqueue(payload("12345")); err != nil {
+		t.Fatalf("expected oversized payload to be accepted when it fits within pending limit, got %v", err)
+	}
+
+	batch := receiveBatchWithin(t, d.Batches(), 200*time.Millisecond)
+	if got := batchStrings(batch); len(got) != 1 || got[0] != "12345" {
+		t.Fatalf("expected oversized payload to flush alone, got %#v", got)
+	}
+	if got := totalBatchBytes(batch); got != int64(len("12345")) {
+		t.Fatalf("expected oversized payload batch to preserve full payload size, got %d", got)
 	}
 
 	d2 := newDispatcher(t, &Config{
@@ -695,6 +703,30 @@ func TestBatchByteLimitBoundsEmittedBatchSize(t *testing.T) {
 	second := receiveBatchWithin(t, d.Batches(), 300*time.Millisecond)
 	if got := totalBatchBytes(second); got > 4 {
 		t.Fatalf("expected second batch to stay within byte limit, got %d", got)
+	}
+}
+
+func TestSinglePayloadMayExceedBatchByteLimitWhenItFitsPendingLimit(t *testing.T) {
+	d := newDispatcher(t, &Config{
+		Interval:        time.Hour,
+		MaxBatchBytes:   4,
+		MaxPendingBytes: 32,
+	})
+	go d.Start()
+	t.Cleanup(func() {
+		stopWithin(t, d, 2*time.Second)
+	})
+
+	if err := d.Enqueue(payload("12345")); err != nil {
+		t.Fatalf("expected oversized single payload to be accepted, got %v", err)
+	}
+
+	batch := receiveBatchWithin(t, d.Batches(), 200*time.Millisecond)
+	if got := totalBatchBytes(batch); got != int64(len("12345")) {
+		t.Fatalf("expected emitted batch to contain full oversized payload, got %d", got)
+	}
+	if got := batchStrings(batch); len(got) != 1 || got[0] != "12345" {
+		t.Fatalf("expected oversized payload to flush as its own batch, got %#v", got)
 	}
 }
 

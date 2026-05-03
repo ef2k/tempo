@@ -32,6 +32,10 @@ Tempo is byte-oriented:
 - `MaxBatchBytes` shapes work per dispatch
 - `Interval` bounds latency for partial batches
 
+If a single payload is larger than `MaxBatchBytes` but still fits within
+`MaxPendingBytes`, Tempo accepts it and flushes it as a one-item batch. Only
+payloads that exceed `MaxPendingBytes` are rejected.
+
 Use it for:
 - Analytics and telemetry ingestion - Batch clicks, heartbeats, and errors
   before inserting them into a database or warehouse.

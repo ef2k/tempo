@@ -15,7 +15,7 @@ var (
 	ErrBadInterval      = errors.New("tempo: interval must be greater than zero")
 	ErrBadMaxBatchBytes = errors.New("tempo: max batch bytes must be greater than zero")
 	ErrBadMaxPending    = errors.New("tempo: max pending bytes must be greater than zero")
-	ErrPayloadTooLarge  = errors.New("tempo: payload exceeds configured byte limit")
+	ErrPayloadTooLarge  = errors.New("tempo: payload exceeds configured pending byte limit")
 )
 
 const (
@@ -271,7 +271,7 @@ func (d *Dispatcher) Enqueue(v []byte) error {
 	}
 
 	size := int64(len(v))
-	if size > d.MaxBatchBytes || size > d.MaxPendingBytes {
+	if size > d.MaxPendingBytes {
 		return ErrPayloadTooLarge
 	}
 
