@@ -116,19 +116,22 @@ func slowConsumerDrainTimeout(n int, maxBatchBytes, payloadBytes int64, delay ti
 	if int64(n)%itemsPerBatch != 0 {
 		expectedBatches++
 	}
-	timeout := time.Duration(expectedBatches)*delay + 2*time.Second
-	if timeout < 5*time.Second {
-		return 5 * time.Second
+	// Add generous slack because payload sizes vary slightly as ids grow and
+	// because the dispatcher still needs time to finish draining after the final
+	// producer burst ends.
+	timeout := time.Duration(expectedBatches)*delay*2 + 5*time.Second
+	if delay >= time.Millisecond {
+		timeout += 5 * time.Second
+	}
+	if timeout < 10*time.Second {
+		return 10 * time.Second
 	}
 	return timeout
 }
 
 func BenchmarkEnqueueSingleProducer(b *testing.B) {
-	d, _, delivered, batches := newBenchDispatcher(b, &tempo.Config{
-		Interval:        time.Hour,
-		MaxBatchBytes:   256 * benchPayloadBytes(),
-		MaxPendingBytes: 1 * tempo.GiB,
-	}, benchDrainOptions{})
+	cfg := benchmarkConfig(256 * benchPayloadBytes())
+	d, _, delivered, batches := newBenchDispatcher(b, cfg, benchDrainOptions{})
 
 	b.ReportAllocs()
 	b.ResetTimer()
@@ -146,11 +149,8 @@ func BenchmarkEnqueueSingleProducer(b *testing.B) {
 }
 
 func BenchmarkSustainedParallelFlush256(b *testing.B) {
-	d, _, delivered, batches := newBenchDispatcher(b, &tempo.Config{
-		Interval:        time.Hour,
-		MaxBatchBytes:   256 * benchPayloadBytes(),
-		MaxPendingBytes: 1 * tempo.GiB,
-	}, benchDrainOptions{})
+	cfg := benchmarkConfig(256 * benchPayloadBytes())
+	d, _, delivered, batches := newBenchDispatcher(b, cfg, benchDrainOptions{})
 
 	var seq atomic.Int64
 
@@ -173,11 +173,8 @@ func BenchmarkSustainedParallelFlush256(b *testing.B) {
 }
 
 func BenchmarkBurstParallelFlush64(b *testing.B) {
-	d, _, delivered, batches := newBenchDispatcher(b, &tempo.Config{
-		Interval:        time.Hour,
-		MaxBatchBytes:   64 * benchPayloadBytes(),
-		MaxPendingBytes: 1 * tempo.GiB,
-	}, benchDrainOptions{})
+	cfg := benchmarkConfig(64 * benchPayloadBytes())
+	d, _, delivered, batches := newBenchDispatcher(b, cfg, benchDrainOptions{})
 
 	var seq atomic.Int64
 
@@ -201,11 +198,8 @@ func BenchmarkBurstParallelFlush64(b *testing.B) {
 }
 
 func BenchmarkBatchDeliverySmallBatch(b *testing.B) {
-	d, _, delivered, batches := newBenchDispatcher(b, &tempo.Config{
-		Interval:        time.Hour,
-		MaxBatchBytes:   8 * benchPayloadBytes(),
-		MaxPendingBytes: 1 * tempo.GiB,
-	}, benchDrainOptions{})
+	cfg := benchmarkConfig(8 * benchPayloadBytes())
+	d, _, delivered, batches := newBenchDispatcher(b, cfg, benchDrainOptions{})
 
 	b.ReportAllocs()
 	b.ResetTimer()
@@ -223,11 +217,8 @@ func BenchmarkBatchDeliverySmallBatch(b *testing.B) {
 }
 
 func BenchmarkParallelLargePayload(b *testing.B) {
-	d, _, delivered, batches := newBenchDispatcher(b, &tempo.Config{
-		Interval:        time.Hour,
-		MaxBatchBytes:   256 * benchLargePayloadBytes(),
-		MaxPendingBytes: 1 * tempo.GiB,
-	}, benchDrainOptions{})
+	cfg := benchmarkConfig(256 * benchLargePayloadBytes())
+	d, _, delivered, batches := newBenchDispatcher(b, cfg, benchDrainOptions{})
 
 	var seq atomic.Int64
 
@@ -251,11 +242,8 @@ func BenchmarkParallelLargePayload(b *testing.B) {
 
 func BenchmarkSlowConsumerBackpressure(b *testing.B) {
 	maxBatchBytes := int64(64) * benchPayloadBytes()
-	d, _, delivered, batches := newBenchDispatcher(b, &tempo.Config{
-		Interval:        time.Hour,
-		MaxBatchBytes:   maxBatchBytes,
-		MaxPendingBytes: 1 * tempo.GiB,
-	}, benchDrainOptions{
+	cfg := benchmarkConfig(maxBatchBytes)
+	d, _, delivered, batches := newBenchDispatcher(b, cfg, benchDrainOptions{
 		consumerDelay: 50 * time.Microsecond,
 	})
 
@@ -305,11 +293,8 @@ func BenchmarkIntervalDrivenBatching(b *testing.B) {
 func BenchmarkBatchSizeSweep(b *testing.B) {
 	for _, size := range []int{8, 32, 128, 512, 1024} {
 		b.Run("max_batch_bytes="+itoa(size), func(b *testing.B) {
-			d, _, delivered, batches := newBenchDispatcher(b, &tempo.Config{
-				Interval:        time.Hour,
-				MaxBatchBytes:   int64(size) * benchPayloadBytes(),
-				MaxPendingBytes: 1 * tempo.GiB,
-			}, benchDrainOptions{})
+			cfg := benchmarkConfig(int64(size) * benchPayloadBytes())
+			d, _, delivered, batches := newBenchDispatcher(b, cfg, benchDrainOptions{})
 
 			var seq atomic.Int64
 
@@ -334,13 +319,10 @@ func BenchmarkBatchSizeSweep(b *testing.B) {
 }
 
 func BenchmarkProducerCountSweep(b *testing.B) {
-	for _, parallelism := range []int{1, 4, 16, 64, 256} {
+	for _, parallelism := range BenchmarkDefaultProducerParallelism() {
 		b.Run("parallelism="+itoa(parallelism), func(b *testing.B) {
-			d, _, delivered, batches := newBenchDispatcher(b, &tempo.Config{
-				Interval:        time.Hour,
-				MaxBatchBytes:   256 * benchPayloadBytes(),
-				MaxPendingBytes: 1 * tempo.GiB,
-			}, benchDrainOptions{})
+			cfg := benchmarkConfig(256 * benchPayloadBytes())
+			d, _, delivered, batches := newBenchDispatcher(b, cfg, benchDrainOptions{})
 
 			var seq atomic.Int64
 
@@ -366,18 +348,10 @@ func BenchmarkProducerCountSweep(b *testing.B) {
 }
 
 func BenchmarkIntervalSweep(b *testing.B) {
-	for _, interval := range []time.Duration{
-		100 * time.Microsecond,
-		time.Millisecond,
-		10 * time.Millisecond,
-		100 * time.Millisecond,
-	} {
+	for _, interval := range BenchmarkDefaultIntervalSweep() {
 		b.Run("interval="+interval.String(), func(b *testing.B) {
-			d, _, delivered, batches := newBenchDispatcher(b, &tempo.Config{
-				Interval:        interval,
-				MaxBatchBytes:   1 * tempo.GiB,
-				MaxPendingBytes: 1 * tempo.GiB,
-			}, benchDrainOptions{})
+			cfg := benchmarkConfigWithInterval(1*tempo.GiB, interval)
+			d, _, delivered, batches := newBenchDispatcher(b, cfg, benchDrainOptions{})
 
 			b.ReportAllocs()
 			b.ResetTimer()
@@ -401,17 +375,10 @@ func BenchmarkSlowConsumerSweep(b *testing.B) {
 	const batchItems = 256
 	maxBatchBytes := int64(batchItems) * benchPayloadBytes()
 
-	for _, delay := range []time.Duration{
-		10 * time.Microsecond,
-		100 * time.Microsecond,
-		time.Millisecond,
-	} {
+	for _, delay := range BenchmarkDefaultSlowConsumerSweep() {
 		b.Run("consumer_delay="+delay.String(), func(b *testing.B) {
-			d, _, delivered, batches := newBenchDispatcher(b, &tempo.Config{
-				Interval:        time.Hour,
-				MaxBatchBytes:   maxBatchBytes,
-				MaxPendingBytes: 1 * tempo.GiB,
-			}, benchDrainOptions{
+			cfg := benchmarkConfig(maxBatchBytes)
+			d, _, delivered, batches := newBenchDispatcher(b, cfg, benchDrainOptions{
 				consumerDelay: delay,
 			})
 

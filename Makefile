@@ -1,4 +1,4 @@
-.PHONY: install test race bench stress soak soak-slow soak-slow-bounded soak-long clean
+.PHONY: install test race bench stress soak tune clean
 
 TEST_PACKAGES := $(filter-out github.com/ef2k/tempo/performance,$(shell go list ./...))
 
@@ -21,17 +21,10 @@ soak: SOAK_DURATION ?= 5m
 soak:
 	TEMPO_RUN_SOAK=1 TEMPO_SOAK_DURATION=$(SOAK_DURATION) go test -timeout 20m -v -run '^TestSoakSustainedLoadStaysHealthy$$' ./performance
 
-soak-slow: SOAK_DURATION ?= 5m
-soak-slow:
-	TEMPO_RUN_SOAK=1 TEMPO_SOAK_DURATION=$(SOAK_DURATION) TEMPO_SOAK_CONSUMER_DELAY=100us go test -timeout 20m -v -run '^TestSoakSustainedLoadStaysHealthy$$' ./performance
-
-soak-slow-bounded: SOAK_DURATION ?= 5m
-soak-slow-bounded: SOAK_MAX_PENDING_ITEMS ?= 100000
-soak-slow-bounded:
-	TEMPO_RUN_SOAK=1 TEMPO_SOAK_DURATION=$(SOAK_DURATION) TEMPO_SOAK_CONSUMER_DELAY=100us TEMPO_SOAK_MAX_PENDING_ITEMS=$(SOAK_MAX_PENDING_ITEMS) go test -timeout 20m -v -run '^TestSoakSustainedLoadStaysHealthy$$' ./performance
-
-soak-long:
-	TEMPO_RUN_SOAK=1 TEMPO_SOAK_DURATION=30m go test -timeout 70m -v -run '^TestSoakSustainedLoadStaysHealthy$$' ./performance
+tune: TUNE_DURATION ?= 15s
+tune: TUNE_CONSUMER_DELAY ?=
+tune:
+	go run ./performance/cmd/tempo-tune -duration $(TUNE_DURATION) $(if $(TUNE_CONSUMER_DELAY),-consumer-delay $(TUNE_CONSUMER_DELAY),)
 
 clean:
 	rm -rf performance/out

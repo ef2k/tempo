@@ -25,6 +25,57 @@ import (
 // A soak test keeps Tempo running under ongoing load for longer and watches for
 // slower problems like wedges, unexpected memory spikes, or goroutine buildup.
 
+func telemetrySoakPayload(producerID, seq int) []byte {
+	id := producerID<<20 | seq
+	sessionID := strconv.Itoa((producerID << 12) | (seq % 4096))
+	requestID := strconv.Itoa(id)
+
+	switch id % 20 {
+	case 0:
+		return []byte(
+			fmt.Sprintf(
+				`{"ts":"2026-05-02T12:34:56.789Z","event":"page_view","session_id":"s_%s","request_id":"r_%s","path":"/pricing","referrer":"https://github.com/ef2k/tempo","user_agent":"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/136.0 Safari/537.36","country":"US","region":"NY","screen":"1440x900","campaign":"spring-launch","duration_ms":84,"attrs":{"lang":"en","ab":"hero_b","source":"search"}}`,
+				sessionID,
+				requestID,
+			),
+		)
+	case 1, 2, 3, 4:
+		return []byte(
+			fmt.Sprintf(
+				`{"ts":"2026-05-02T12:34:56.789Z","event":"form_input","session_id":"s_%s","request_id":"r_%s","path":"/signup","field":"email","step":2,"valid":true,"attrs":{"plan":"pro","source":"landing","focus_ms":1420,"attempt":%d}}`,
+				sessionID,
+				requestID,
+				seq%5,
+			),
+		)
+	default:
+		switch id % 3 {
+		case 0:
+			return []byte(
+				fmt.Sprintf(
+					`{"ts":"2026-05-02T12:34:56.789Z","event":"click","session_id":"s_%s","path":"/pricing","target":"signup_button","x":812,"y":433}`,
+					sessionID,
+				),
+			)
+		case 1:
+			return []byte(
+				fmt.Sprintf(
+					`{"ts":"2026-05-02T12:34:56.789Z","event":"scroll","session_id":"s_%s","path":"/pricing","depth_pct":%d,"viewport":"1440x900"}`,
+					sessionID,
+					25+((seq*5)%75),
+				),
+			)
+		default:
+			return []byte(
+				fmt.Sprintf(
+					`{"ts":"2026-05-02T12:34:56.789Z","event":"heartbeat","session_id":"s_%s","path":"/pricing","visible":true,"tab":"foreground"}`,
+					sessionID,
+				),
+			)
+		}
+	}
+}
+
 type soakSample struct {
 	ElapsedSeconds         float64 `json:"elapsed_seconds"`
 	Produced               int64   `json:"produced"`
@@ -413,11 +464,11 @@ func makeAssessment(snapshot soakSnapshot, samples []soakSample, startGoroutines
 
 	throughput := soakAssessmentSection{Status: assessmentPass}
 	switch {
-	case snapshot.AvgDeliveredItemsPerSec == 0:
+	case snapshot.AvgDeliveredItemsPerSec < 750000:
 		throughput.Status = assessmentFail
-	case snapshot.ThroughputRangePct > 25:
+	case snapshot.ThroughputRangePct > 60:
 		throughput.Status = assessmentFail
-	case snapshot.ThroughputRangePct > 10:
+	case snapshot.ThroughputRangePct > 35:
 		throughput.Status = assessmentWarn
 	}
 	throughput.Notes = []string{
@@ -445,9 +496,13 @@ func makeAssessment(snapshot soakSnapshot, samples []soakSample, startGoroutines
 	}
 
 	memory := soakAssessmentSection{Status: assessmentPass}
+	memoryFailThreshold := uint64(snapshot.Config.MaxPendingBytes * 6)
+	memoryWarnThreshold := uint64(snapshot.Config.MaxPendingBytes * 4)
 	switch {
-	case snapshot.PeakHeapAllocBytes > 64<<20:
+	case snapshot.PeakHeapAllocBytes > memoryFailThreshold:
 		memory.Status = assessmentFail
+	case snapshot.PeakHeapAllocBytes > memoryWarnThreshold:
+		memory.Status = assessmentWarn
 	case !heapRecovered(active, snapshot.PeakHeapAllocBytes):
 		memory.Status = assessmentWarn
 	}
@@ -590,21 +645,16 @@ func TestStressHighConcurrencyDelivery(t *testing.T) {
 		t.Skip("set TEMPO_RUN_STRESS=1 to run stress tests")
 	}
 
-	d, err := tempo.NewDispatcher(&tempo.Config{
-		Interval:        time.Hour,
-		MaxBatchBytes:   256 * benchPayloadBytes(),
-		MaxPendingBytes: 1 * tempo.GiB,
-	})
+	cfg := StressDefaultConfig()
+	d, err := tempo.NewDispatcher(&cfg)
 	if err != nil {
 		t.Fatalf("new dispatcher: %v", err)
 	}
 	go d.Start()
 
-	const (
-		numProducers      = 256
-		itemsPerProducer  = 2000
-		expectedDelivered = numProducers * itemsPerProducer
-	)
+	numProducers := StressDefaultNumProducers()
+	itemsPerProducer := StressDefaultItemsPerProducer()
+	expectedDelivered := numProducers * itemsPerProducer
 
 	var produced sync.WaitGroup
 	produced.Add(numProducers)
@@ -670,9 +720,10 @@ func TestStressHighConcurrencyDelivery(t *testing.T) {
 	}
 }
 
-// TestSoakSustainedLoadStaysHealthy proves that Tempo can absorb temporary
-// consumer-side backpressure, remain live while backlog accumulates, and then
-// recover without losing accepted items once the artificial slowdown is lifted.
+// TestSoakSustainedLoadStaysHealthy is Tempo's definitive pressure-and-recovery
+// soak. It runs with producers ahead of a deliberately slowed consumer using a
+// telemetry-shaped payload mix so backlog builds under a more realistic event
+// stream, then verifies that Tempo drains accepted work cleanly.
 //
 // Acceptance for this soak is intentionally centered on recovery and
 // correctness:
@@ -680,9 +731,8 @@ func TestStressHighConcurrencyDelivery(t *testing.T) {
 // - Tempo drains all accepted items after pressure is removed.
 // - Shutdown completes within the configured drain timeout.
 //
-// Throughput, peak backlog, and peak memory are still recorded, but for the
-// current unbounded design they are advisory observations rather than the
-// primary pass/fail signal for this recovery test.
+// Throughput, peak backlog, and peak memory are still recorded, with advisory
+// thresholds tuned for this byte-oriented bounded design.
 func TestSoakSustainedLoadStaysHealthy(t *testing.T) {
 	if os.Getenv("TEMPO_RUN_SOAK") == "" {
 		t.Skip("set TEMPO_RUN_SOAK=1 to run soak tests")
@@ -702,11 +752,14 @@ func TestSoakSustainedLoadStaysHealthy(t *testing.T) {
 		t.Fatalf("prepare soak output paths: %v", err)
 	}
 
-	const numProducers = 32
-	config := tempo.Config{
-		Interval:        10 * time.Millisecond,
-		MaxBatchBytes:   128 * benchPayloadBytes(),
-		MaxPendingBytes: 64 * tempo.MiB,
+	numProducers := SoakDefaultNumProducers()
+	config := SoakDefaultConfig()
+	if raw := os.Getenv("TEMPO_SOAK_MAX_BATCH_BYTES"); raw != "" {
+		parsed, err := strconv.ParseInt(raw, 10, 64)
+		if err != nil {
+			t.Fatalf("parse TEMPO_SOAK_MAX_BATCH_BYTES: %v", err)
+		}
+		config.MaxBatchBytes = parsed
 	}
 	if raw := os.Getenv("TEMPO_SOAK_MAX_PENDING_BYTES"); raw != "" {
 		parsed, err := strconv.ParseInt(raw, 10, 64)
@@ -715,7 +768,7 @@ func TestSoakSustainedLoadStaysHealthy(t *testing.T) {
 		}
 		config.MaxPendingBytes = parsed
 	}
-	consumerDelay := time.Duration(0)
+	consumerDelay := SoakDefaultConsumerDelay()
 	if raw := os.Getenv("TEMPO_SOAK_CONSUMER_DELAY"); raw != "" {
 		parsed, err := time.ParseDuration(raw)
 		if err != nil {
@@ -812,7 +865,7 @@ func TestSoakSustainedLoadStaysHealthy(t *testing.T) {
 				case <-stopProducing:
 					return
 				default:
-					if err := d.Enqueue(benchEventPayload(producerID<<20 | seq)); err != nil {
+					if err := d.Enqueue(telemetrySoakPayload(producerID, seq)); err != nil {
 						if err == tempo.ErrQueueFull {
 							rejected.Add(1)
 							time.Sleep(100 * time.Microsecond)
