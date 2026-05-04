@@ -2,17 +2,18 @@ package tuner
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"runtime"
-	"slices"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
+
+	tempo "github.com/ef2k/tempo"
 )
 
 const (
@@ -22,280 +23,367 @@ const (
 )
 
 type Options struct {
-	RepoRoot       string
-	SoakDuration   time.Duration
-	ConsumerDelay  time.Duration
-	ConsumerDelays []time.Duration
-	TestTimeout    time.Duration
-	BatchBytes     []int64
-	PendingBytes   []int64
-}
-
-type Candidate struct {
-	ConsumerDelay    time.Duration
-	MaxBatchBytes    int64
-	MaxBufferedBytes int64
+	PayloadBytes  int64
+	ProbeDuration time.Duration
 }
 
 type Recommendation struct {
-	TotalMemoryBytes uint64
-	Candidates       []Candidate
-	Runs             []RunResult
-	Best             RunResult
-}
-
-type RunResult struct {
-	Candidate               Candidate
-	Produced                int64
-	Rejected                int64
-	Delivered               int64
-	AvgDeliveredItemsPerSec float64
-	PeakHeapAllocBytes      uint64
-	OverallStatus           string
-	ResultsPath             string
-	StreamPath              string
-}
-
-type soakSnapshot struct {
-	Produced                int64   `json:"produced"`
-	Rejected                int64   `json:"rejected"`
-	Delivered               int64   `json:"delivered"`
-	AvgDeliveredItemsPerSec float64 `json:"avg_delivered_items_per_second"`
-	PeakHeapAllocBytes      uint64  `json:"peak_heap_alloc_bytes"`
-	Assessment              struct {
-		Overall struct {
-			Status string `json:"status"`
-		} `json:"overall"`
-	} `json:"assessment"`
+	TotalMemoryBytes        uint64
+	PayloadBytes            int64
+	ProbeDuration           time.Duration
+	ProducerCount           int
+	ObservedItemsPerSec     float64
+	ObservedBytesPerSec     float64
+	ObservedPeakHeapBytes   uint64
+	ObservedPeakBuffered    int64
+	RecommendedMaxBuffered  int64
+	RecommendedMaxBatch     int64
+	BufferedItemCapacity    int64
+	EstimatedBurstWindow    time.Duration
+	Rejections              int64
+	BatchShapingRecommended bool
+	Notes                   []string
 }
 
 func Tune(ctx context.Context, opts Options) (Recommendation, error) {
-	if opts.RepoRoot == "" {
-		return Recommendation{}, errors.New("repo root is required")
+	if opts.PayloadBytes <= 0 {
+		return Recommendation{}, errors.New("payload bytes must be greater than zero")
 	}
-	if opts.SoakDuration <= 0 {
-		opts.SoakDuration = 15 * time.Second
-	}
-	if opts.TestTimeout <= 0 {
-		opts.TestTimeout = 3 * time.Minute
+	if opts.ProbeDuration <= 0 {
+		opts.ProbeDuration = 5 * time.Second
 	}
 
 	totalMem, _ := detectTotalMemoryBytes()
-	if len(opts.BatchBytes) == 0 {
-		opts.BatchBytes = []int64{4 * KiB, 7 * KiB, 8 * KiB, 16 * KiB, 32 * KiB}
-	}
-	if len(opts.PendingBytes) == 0 {
-		opts.PendingBytes = defaultPendingCandidates(totalMem)
-	}
-	if opts.ConsumerDelay > 0 {
-		opts.ConsumerDelays = []time.Duration{opts.ConsumerDelay}
-	}
-	if len(opts.ConsumerDelays) == 0 {
-		opts.ConsumerDelays = []time.Duration{200 * time.Microsecond}
-	}
+	producers := recommendedProducerCount()
+	probeBuffered := probeBufferedBudget(totalMem, opts.PayloadBytes)
+	probeBatch := probeBatchBytes(opts.PayloadBytes, probeBuffered)
 
-	opts.BatchBytes = uniquePositive(opts.BatchBytes)
-	opts.PendingBytes = uniquePositive(opts.PendingBytes)
-	opts.ConsumerDelays = uniqueDurations(opts.ConsumerDelays)
-
-	if len(opts.BatchBytes) == 0 || len(opts.PendingBytes) == 0 || len(opts.ConsumerDelays) == 0 {
-		return Recommendation{}, errors.New("no candidate values to test")
-	}
-
-	candidates := make([]Candidate, 0, len(opts.ConsumerDelays)*len(opts.BatchBytes)*len(opts.PendingBytes))
-	for _, delay := range opts.ConsumerDelays {
-		for _, batch := range opts.BatchBytes {
-			for _, pending := range opts.PendingBytes {
-				if pending < batch {
-					continue
-				}
-				candidates = append(candidates, Candidate{
-					ConsumerDelay:    delay,
-					MaxBatchBytes:    batch,
-					MaxBufferedBytes: pending,
-				})
-			}
-		}
-	}
-
-	if len(candidates) == 0 {
-		return Recommendation{}, errors.New("no valid candidate combinations")
-	}
-
-	runs := make([]RunResult, 0, len(candidates))
-	for _, candidate := range candidates {
-		run, err := runSoak(ctx, opts, candidate)
-		if err != nil {
-			return Recommendation{}, err
-		}
-		runs = append(runs, run)
-	}
-
-	best, err := chooseBest(runs)
+	itemsPerSec, bytesPerSec, peakHeap, peakBuffered, rejected, err := runProbe(ctx, probeConfig{
+		PayloadBytes:     opts.PayloadBytes,
+		ProbeDuration:    opts.ProbeDuration,
+		ProducerCount:    producers,
+		MaxBufferedBytes: probeBuffered,
+		MaxBatchBytes:    probeBatch,
+	})
 	if err != nil {
 		return Recommendation{}, err
 	}
 
+	recommendedBuffered := recommendBufferedBudget(totalMem, opts.PayloadBytes, bytesPerSec)
+	recommendedBatch := recommendBatchBytes(opts.PayloadBytes, recommendedBuffered)
+	batchRecommended := recommendedBatch > 0
+	bufferedItems := int64(0)
+	if opts.PayloadBytes > 0 {
+		bufferedItems = recommendedBuffered / opts.PayloadBytes
+	}
+
+	burstWindow := time.Duration(0)
+	if bytesPerSec > 0 {
+		seconds := float64(recommendedBuffered) / bytesPerSec
+		burstWindow = time.Duration(seconds * float64(time.Second))
+	}
+
+	notes := []string{
+		"MaxBufferedBytes is the primary safety boundary.",
+		"MaxBatchBytes is optional shaping; leave it unset if downstream batch size does not matter.",
+	}
+	if !batchRecommended {
+		notes = append(notes, "Payloads are large enough that batch-size shaping is not recommended by default on this machine.")
+	} else {
+		notes = append(notes, fmt.Sprintf("Recommended MaxBatchBytes is sized to fit several payloads without becoming brittle for single large items."))
+	}
+	if totalMem > 0 {
+		notes = append(notes, fmt.Sprintf("Recommendation is capped to a conservative fraction of detected machine memory (%s total).", formatBytes(int64(totalMem))))
+	}
+	if rejected > 0 {
+		notes = append(notes, "The probe observed some queue pressure while measuring top speed; consider a larger machine if your real traffic is burstier than this payload model.")
+	}
+
 	return Recommendation{
-		TotalMemoryBytes: totalMem,
-		Candidates:       candidates,
-		Runs:             runs,
-		Best:             best,
+		TotalMemoryBytes:        totalMem,
+		PayloadBytes:            opts.PayloadBytes,
+		ProbeDuration:           opts.ProbeDuration,
+		ProducerCount:           producers,
+		ObservedItemsPerSec:     itemsPerSec,
+		ObservedBytesPerSec:     bytesPerSec,
+		ObservedPeakHeapBytes:   peakHeap,
+		ObservedPeakBuffered:    peakBuffered,
+		RecommendedMaxBuffered:  recommendedBuffered,
+		RecommendedMaxBatch:     recommendedBatch,
+		BufferedItemCapacity:    bufferedItems,
+		EstimatedBurstWindow:    burstWindow,
+		Rejections:              rejected,
+		BatchShapingRecommended: batchRecommended,
+		Notes:                   notes,
 	}, nil
 }
 
-func runSoak(ctx context.Context, opts Options, candidate Candidate) (RunResult, error) {
-	outDir, err := os.MkdirTemp("", "tempo-tune-*")
-	if err != nil {
-		return RunResult{}, err
-	}
-	defer os.RemoveAll(outDir)
-
-	cmd := exec.CommandContext(
-		ctx,
-		"go", "test",
-		"-timeout", opts.TestTimeout.String(),
-		"-run", "^TestSoakSustainedLoadStaysHealthy$",
-		"-v", "./performance",
-	)
-	cmd.Dir = opts.RepoRoot
-	cmd.Env = append(os.Environ(),
-		"TEMPO_RUN_SOAK=1",
-		"TEMPO_SOAK_DURATION="+opts.SoakDuration.String(),
-		"TEMPO_SOAK_CONSUMER_DELAY="+candidate.ConsumerDelay.String(),
-		"TEMPO_SOAK_MAX_BATCH_BYTES="+strconv.FormatInt(candidate.MaxBatchBytes, 10),
-		"TEMPO_SOAK_MAX_PENDING_BYTES="+strconv.FormatInt(candidate.MaxBufferedBytes, 10),
-		"TEMPO_SOAK_OUT_DIR="+outDir,
-	)
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		return RunResult{}, fmt.Errorf("run soak for delay=%s batch=%d pending=%d: %w\n%s", candidate.ConsumerDelay, candidate.MaxBatchBytes, candidate.MaxBufferedBytes, err, output)
-	}
-
-	matches, err := filepath.Glob(filepath.Join(outDir, "*-results.json"))
-	if err != nil {
-		return RunResult{}, err
-	}
-	if len(matches) != 1 {
-		return RunResult{}, fmt.Errorf("expected one results file in %s, found %d", outDir, len(matches))
-	}
-
-	snapshotBytes, err := os.ReadFile(matches[0])
-	if err != nil {
-		return RunResult{}, err
-	}
-
-	var snapshot soakSnapshot
-	if err := json.Unmarshal(snapshotBytes, &snapshot); err != nil {
-		return RunResult{}, err
-	}
-
-	streamPath := strings.TrimSuffix(matches[0], "-results.json") + ".jsonl"
-	return RunResult{
-		Candidate:               candidate,
-		Produced:                snapshot.Produced,
-		Rejected:                snapshot.Rejected,
-		Delivered:               snapshot.Delivered,
-		AvgDeliveredItemsPerSec: snapshot.AvgDeliveredItemsPerSec,
-		PeakHeapAllocBytes:      snapshot.PeakHeapAllocBytes,
-		OverallStatus:           snapshot.Assessment.Overall.Status,
-		ResultsPath:             matches[0],
-		StreamPath:              streamPath,
-	}, nil
+type probeConfig struct {
+	PayloadBytes     int64
+	ProbeDuration    time.Duration
+	ProducerCount    int
+	MaxBufferedBytes int64
+	MaxBatchBytes    int64
 }
 
-func chooseBest(runs []RunResult) (RunResult, error) {
-	if len(runs) == 0 {
-		return RunResult{}, errors.New("no tuning runs recorded")
+func runProbe(ctx context.Context, cfg probeConfig) (itemsPerSec, bytesPerSec float64, peakHeapBytes uint64, peakBufferedBytes int64, rejected int64, err error) {
+	d, err := tempo.NewDispatcher(&tempo.Config{
+		Interval:         5 * time.Millisecond,
+		MaxBatchBytes:    cfg.MaxBatchBytes,
+		MaxBufferedBytes: cfg.MaxBufferedBytes,
+	})
+	if err != nil {
+		return 0, 0, 0, 0, 0, err
+	}
+	go d.Start()
+
+	payload := make([]byte, cfg.PayloadBytes)
+	for i := range payload {
+		payload[i] = 'x'
 	}
 
-	best := runs[0]
-	for _, run := range runs[1:] {
-		if better(run, best) {
-			best = run
+	var produced atomic.Int64
+	var delivered atomic.Int64
+	var rejectedCount atomic.Int64
+	var peakBuffered atomic.Int64
+
+	stopConsumers := make(chan struct{})
+	var consumerWG sync.WaitGroup
+	consumerWG.Add(1)
+	go func() {
+		defer consumerWG.Done()
+		for {
+			select {
+			case batch := <-d.Batches():
+				delivered.Add(int64(len(batch)))
+				currentBuffered := produced.Load() - delivered.Load()
+				for {
+					peak := peakBuffered.Load()
+					if currentBuffered <= peak || peakBuffered.CompareAndSwap(peak, currentBuffered) {
+						break
+					}
+				}
+			case <-stopConsumers:
+				return
+			}
 		}
+	}()
+
+	stopProducers := make(chan struct{})
+	var producerWG sync.WaitGroup
+	producerWG.Add(cfg.ProducerCount)
+	for i := 0; i < cfg.ProducerCount; i++ {
+		go func() {
+			defer producerWG.Done()
+			for {
+				select {
+				case <-stopProducers:
+					return
+				default:
+				}
+
+				if err := d.Enqueue(payload); err != nil {
+					if err == tempo.ErrQueueFull {
+						rejectedCount.Add(1)
+						runtime.Gosched()
+						continue
+					}
+					return
+				}
+				produced.Add(1)
+			}
+		}()
 	}
-	return best, nil
+
+	var peakHeap uint64
+	var samplerWG sync.WaitGroup
+	samplerWG.Add(1)
+	go func() {
+		defer samplerWG.Done()
+		ticker := time.NewTicker(50 * time.Millisecond)
+		defer ticker.Stop()
+		var mem runtime.MemStats
+		for {
+			select {
+			case <-ticker.C:
+				runtime.ReadMemStats(&mem)
+				if mem.HeapAlloc > peakHeap {
+					peakHeap = mem.HeapAlloc
+				}
+			case <-stopProducers:
+				runtime.ReadMemStats(&mem)
+				if mem.HeapAlloc > peakHeap {
+					peakHeap = mem.HeapAlloc
+				}
+				return
+			}
+		}
+	}()
+
+	timer := time.NewTimer(cfg.ProbeDuration)
+	select {
+	case <-ctx.Done():
+		err = ctx.Err()
+	case <-timer.C:
+	}
+
+	close(stopProducers)
+	producerWG.Wait()
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), max(2*time.Second, cfg.ProbeDuration))
+	defer cancel()
+	if shutdownErr := d.Shutdown(shutdownCtx); err == nil && shutdownErr != nil {
+		err = shutdownErr
+	}
+	close(stopConsumers)
+	consumerWG.Wait()
+	samplerWG.Wait()
+
+	if err != nil {
+		return 0, 0, 0, 0, 0, err
+	}
+
+	durationSeconds := cfg.ProbeDuration.Seconds()
+	if durationSeconds <= 0 {
+		durationSeconds = 1
+	}
+	itemsPerSec = float64(delivered.Load()) / durationSeconds
+	bytesPerSec = itemsPerSec * float64(cfg.PayloadBytes)
+
+	return itemsPerSec, bytesPerSec, peakHeap, peakBuffered.Load() * cfg.PayloadBytes, rejectedCount.Load(), nil
 }
 
-func better(a, b RunResult) bool {
-	aPass := a.OverallStatus == "pass"
-	bPass := b.OverallStatus == "pass"
-	if aPass != bPass {
-		return aPass
+func recommendedProducerCount() int {
+	n := runtime.NumCPU() * 4
+	if n < 4 {
+		return 4
 	}
-	if a.AvgDeliveredItemsPerSec != b.AvgDeliveredItemsPerSec {
-		return a.AvgDeliveredItemsPerSec > b.AvgDeliveredItemsPerSec
+	if n > 64 {
+		return 64
 	}
-	if a.Delivered != b.Delivered {
-		return a.Delivered > b.Delivered
-	}
-	if a.Rejected != b.Rejected {
-		return a.Rejected < b.Rejected
-	}
-	return a.PeakHeapAllocBytes < b.PeakHeapAllocBytes
+	return n
 }
 
-func defaultPendingCandidates(totalMem uint64) []int64 {
+func probeBufferedBudget(totalMem uint64, payloadBytes int64) int64 {
+	floor := maxInt64(16*MiB, roundToMiB(maxInt64(payloadBytes*2048, 0)))
 	if totalMem == 0 {
-		return []int64{64 * MiB, 128 * MiB, 256 * MiB, 512 * MiB}
+		return floor
 	}
-
-	divisors := []uint64{256, 128, 64, 32}
-	out := make([]int64, 0, len(divisors))
-	for _, divisor := range divisors {
-		candidate := int64(totalMem / divisor)
-		if candidate < 64*MiB {
-			candidate = 64 * MiB
-		}
-		if candidate > 1*GiB {
-			candidate = 1 * GiB
-		}
-		candidate = roundToMiB(candidate)
-		out = append(out, candidate)
+	capBytes := roundToMiB(int64(totalMem / 8))
+	if capBytes < floor {
+		return floor
 	}
-	return uniquePositive(out)
+	if capBytes > 512*MiB {
+		capBytes = 512 * MiB
+	}
+	return capBytes
 }
 
-func uniquePositive(values []int64) []int64 {
-	seen := make(map[int64]struct{}, len(values))
-	out := make([]int64, 0, len(values))
-	for _, value := range values {
-		if value <= 0 {
-			continue
-		}
-		if _, ok := seen[value]; ok {
-			continue
-		}
-		seen[value] = struct{}{}
-		out = append(out, value)
+func recommendBufferedBudget(totalMem uint64, payloadBytes int64, bytesPerSec float64) int64 {
+	floor := maxInt64(16*MiB, roundToMiB(maxInt64(payloadBytes*4096, 0)))
+	target := int64(bytesPerSec * 3)
+	if target < floor {
+		target = floor
 	}
-	slices.Sort(out)
-	return out
+	target = roundToMiB(target)
+
+	if totalMem == 0 {
+		return target
+	}
+
+	capBytes := roundToMiB(int64(totalMem / 8))
+	if capBytes < floor {
+		capBytes = floor
+	}
+	if capBytes > 1*GiB {
+		capBytes = 1 * GiB
+	}
+	if target > capBytes {
+		return capBytes
+	}
+	return target
 }
 
-func uniqueDurations(values []time.Duration) []time.Duration {
-	seen := make(map[time.Duration]struct{}, len(values))
-	out := make([]time.Duration, 0, len(values))
-	for _, value := range values {
-		if value <= 0 {
-			continue
-		}
-		if _, ok := seen[value]; ok {
-			continue
-		}
-		seen[value] = struct{}{}
-		out = append(out, value)
+func probeBatchBytes(payloadBytes, bufferedBytes int64) int64 {
+	if payloadBytes > 256*KiB {
+		return 0
 	}
-	slices.Sort(out)
-	return out
+	batch := recommendBatchBytes(payloadBytes, bufferedBytes)
+	if batch <= 0 {
+		return 0
+	}
+	return batch
+}
+
+func recommendBatchBytes(payloadBytes, bufferedBytes int64) int64 {
+	if payloadBytes <= 0 || bufferedBytes <= 0 {
+		return 0
+	}
+	if payloadBytes > 256*KiB {
+		return 0
+	}
+
+	targetItems := int64(32)
+	switch {
+	case payloadBytes <= 1*KiB:
+		targetItems = 128
+	case payloadBytes <= 16*KiB:
+		targetItems = 32
+	case payloadBytes <= 128*KiB:
+		targetItems = 8
+	default:
+		targetItems = 4
+	}
+
+	batch := payloadBytes * targetItems
+	if batch < 32*KiB {
+		batch = 32 * KiB
+	}
+	if batch > 4*MiB {
+		batch = 4 * MiB
+	}
+	if batch > bufferedBytes/4 {
+		batch = bufferedBytes / 4
+	}
+	if batch < payloadBytes*2 {
+		batch = payloadBytes * 2
+	}
+	if batch <= 0 {
+		return 0
+	}
+	return roundBatchSize(batch)
+}
+
+func roundBatchSize(v int64) int64 {
+	switch {
+	case v >= MiB:
+		return ((v + MiB - 1) / MiB) * MiB
+	case v >= KiB:
+		return ((v + KiB - 1) / KiB) * KiB
+	default:
+		return v
+	}
 }
 
 func roundToMiB(v int64) int64 {
 	if v <= MiB {
 		return v
 	}
-	return (v / MiB) * MiB
+	return ((v + MiB - 1) / MiB) * MiB
+}
+
+func maxInt64(a, b int64) int64 {
+	if a > b {
+		return a
+	}
+	return b
+}
+
+func max(a, b time.Duration) time.Duration {
+	if a > b {
+		return a
+	}
+	return b
 }
 
 func detectTotalMemoryBytes() (uint64, error) {
@@ -321,22 +409,22 @@ func detectTotalMemoryBytes() (uint64, error) {
 		}
 		return parsed, nil
 	default:
-		return 0, fmt.Errorf("unsupported platform for automatic memory detection: %s", runtime.GOOS)
+		return 0, fmt.Errorf("unsupported GOOS for memory detection: %s", runtime.GOOS)
 	}
 }
 
-func readMeminfoValue(key string) (uint64, error) {
+func readMeminfoValue(prefix string) (uint64, error) {
 	data, err := os.ReadFile("/proc/meminfo")
 	if err != nil {
 		return 0, err
 	}
 	for _, line := range strings.Split(string(data), "\n") {
-		if !strings.HasPrefix(line, key) {
+		if !strings.HasPrefix(line, prefix) {
 			continue
 		}
 		fields := strings.Fields(line)
 		if len(fields) < 2 {
-			return 0, fmt.Errorf("unexpected meminfo line for %s", key)
+			break
 		}
 		value, err := strconv.ParseUint(fields[1], 10, 64)
 		if err != nil {
@@ -344,5 +432,18 @@ func readMeminfoValue(key string) (uint64, error) {
 		}
 		return value * 1024, nil
 	}
-	return 0, fmt.Errorf("meminfo key %s not found", key)
+	return 0, fmt.Errorf("could not find %s in /proc/meminfo", prefix)
+}
+
+func formatBytes(v int64) string {
+	switch {
+	case v >= GiB:
+		return fmt.Sprintf("%.2fGiB", float64(v)/float64(GiB))
+	case v >= MiB:
+		return fmt.Sprintf("%.2fMiB", float64(v)/float64(MiB))
+	case v >= KiB:
+		return fmt.Sprintf("%.2fKiB", float64(v)/float64(KiB))
+	default:
+		return fmt.Sprintf("%dB", v)
+	}
 }

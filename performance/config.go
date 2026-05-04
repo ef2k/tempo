@@ -54,11 +54,8 @@ type soakDefaultsSettings struct {
 }
 
 type tuneDefaultsSettings struct {
-	Duration       string   `json:"duration"`
-	ConsumerDelay  string   `json:"consumer_delay"`
-	ConsumerDelays []string `json:"consumer_delays"`
-	BatchBytes     []int64  `json:"batch_bytes"`
-	PendingBytes   []int64  `json:"pending_bytes"`
+	Duration     string `json:"duration"`
+	PayloadBytes int64  `json:"payload_bytes"`
 }
 
 type machineBaseline struct {
@@ -115,7 +112,7 @@ func PerformanceSettingsPath() (string, error) {
 	return settingsPath()
 }
 
-func WriteTunedSettings(delay time.Duration, cfg tempo.Config) (string, error) {
+func WriteTunedSettings(payloadBytes int64, cfg tempo.Config) (string, error) {
 	settings, err := loadPerformanceSettings()
 	if err != nil {
 		return "", err
@@ -125,11 +122,12 @@ func WriteTunedSettings(delay time.Duration, cfg tempo.Config) (string, error) {
 		return "", err
 	}
 
-	settings.SoakDefaults.ConsumerDelay = delay.String()
 	settings.SoakDefaults.MaxBatchBytes = cfg.MaxBatchBytes
 	settings.SoakDefaults.MaxBufferedBytes = cfg.MaxBufferedBytes
 	settings.SoakDefaults.Interval = cfg.Interval.String()
-	settings.TuneDefaults.ConsumerDelay = delay.String()
+	if payloadBytes > 0 {
+		settings.TuneDefaults.PayloadBytes = payloadBytes
+	}
 
 	data, err := json.MarshalIndent(settings, "", "  ")
 	if err != nil {
@@ -174,11 +172,8 @@ func defaultPerformanceSettings() performanceSettings {
 			Duration:         (5 * time.Minute).String(),
 		},
 		TuneDefaults: tuneDefaultsSettings{
-			Duration:       (15 * time.Second).String(),
-			ConsumerDelay:  (200 * time.Microsecond).String(),
-			ConsumerDelays: []string{"100us", "150us", "200us", "300us", "400us"},
-			BatchBytes:     []int64{4 * tempo.KiB, 7 * tempo.KiB, 8 * tempo.KiB, 16 * tempo.KiB, 32 * tempo.KiB},
-			PendingBytes:   []int64{64 * tempo.MiB, 128 * tempo.MiB, 256 * tempo.MiB, 512 * tempo.MiB},
+			Duration:     (5 * time.Second).String(),
+			PayloadBytes: 1024,
 		},
 	}
 }
@@ -260,47 +255,12 @@ func TuneDefaultDuration() time.Duration {
 	return duration
 }
 
-func TuneDefaultConsumerDelay() time.Duration {
+func TuneDefaultPayloadBytes() int64 {
 	cfg, _ := loadPerformanceSettings()
-	delay, _ := time.ParseDuration(cfg.TuneDefaults.ConsumerDelay)
-	if delay <= 0 {
-		return 200 * time.Microsecond
+	if cfg.TuneDefaults.PayloadBytes <= 0 {
+		return 1024
 	}
-	return delay
-}
-
-func TuneDefaultConsumerDelayCandidates() []time.Duration {
-	cfg, _ := loadPerformanceSettings()
-	if len(cfg.TuneDefaults.ConsumerDelays) == 0 {
-		return []time.Duration{100 * time.Microsecond, 150 * time.Microsecond, 200 * time.Microsecond, 300 * time.Microsecond, 400 * time.Microsecond}
-	}
-	out := make([]time.Duration, 0, len(cfg.TuneDefaults.ConsumerDelays))
-	for _, raw := range cfg.TuneDefaults.ConsumerDelays {
-		parsed, err := time.ParseDuration(raw)
-		if err == nil && parsed > 0 {
-			out = append(out, parsed)
-		}
-	}
-	if len(out) == 0 {
-		return []time.Duration{100 * time.Microsecond, 150 * time.Microsecond, 200 * time.Microsecond, 300 * time.Microsecond, 400 * time.Microsecond}
-	}
-	return out
-}
-
-func TuneDefaultBatchCandidates() []int64 {
-	cfg, _ := loadPerformanceSettings()
-	if len(cfg.TuneDefaults.BatchBytes) == 0 {
-		return []int64{4 * tempo.KiB, 7 * tempo.KiB, 8 * tempo.KiB, 16 * tempo.KiB, 32 * tempo.KiB}
-	}
-	return append([]int64(nil), cfg.TuneDefaults.BatchBytes...)
-}
-
-func TuneDefaultPendingCandidates() []int64 {
-	cfg, _ := loadPerformanceSettings()
-	if len(cfg.TuneDefaults.PendingBytes) == 0 {
-		return []int64{64 * tempo.MiB, 128 * tempo.MiB, 256 * tempo.MiB, 512 * tempo.MiB}
-	}
-	return append([]int64(nil), cfg.TuneDefaults.PendingBytes...)
+	return cfg.TuneDefaults.PayloadBytes
 }
 
 func BenchmarkDefaultIntervalSweep() []time.Duration {

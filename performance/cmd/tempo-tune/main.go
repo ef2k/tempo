@@ -5,8 +5,8 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"io"
 	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -16,55 +16,22 @@ import (
 )
 
 func main() {
-	duration := flag.Duration("duration", performance.TuneDefaultDuration(), "soak duration per candidate")
-	delay := flag.Duration("consumer-delay", performance.TuneDefaultConsumerDelay(), "consumer delay for the soak workload")
-	timeout := flag.Duration("timeout", 3*time.Minute, "go test timeout per candidate run")
-	batchArg := flag.String("batch-bytes", "", "comma-separated batch byte candidates")
-	pendingArg := flag.String("pending-bytes", "", "comma-separated pending byte candidates")
-	delayArg := flag.String("consumer-delays", "", "comma-separated consumer delay candidates")
+	duration := flag.Duration("duration", performance.TuneDefaultDuration(), "probe duration")
+	payloadArg := flag.String("payload-bytes", "", "approximate payload size (examples: 512B, 4KiB, 64KiB, 1MiB)")
 	flag.Parse()
-	explicitDelay := flagWasProvided("consumer-delay")
 
-	repoRoot, err := os.Getwd()
+	payloadBytes, err := resolvePayloadBytes(*payloadArg)
 	if err != nil {
-		exitf("get working directory: %v", err)
+		exitf("resolve payload size: %v", err)
 	}
-	repoRoot, err = filepath.Abs(repoRoot)
-	if err != nil {
-		exitf("resolve repo root: %v", err)
-	}
-
-	batches, err := parseInt64List(*batchArg)
-	if err != nil {
-		exitf("parse -batch-bytes: %v", err)
-	}
-	pending, err := parseInt64List(*pendingArg)
-	if err != nil {
-		exitf("parse -pending-bytes: %v", err)
-	}
-	delays, err := parseDurationList(*delayArg)
-	if err != nil {
-		exitf("parse -consumer-delays: %v", err)
-	}
-	effectiveDelays := defaultDurationsIfEmpty(delays, performance.TuneDefaultConsumerDelayCandidates())
 
 	fmt.Printf("tempo tune\n")
-	fmt.Printf("  repo: %s\n", repoRoot)
-	fmt.Printf("  soak duration per candidate: %s\n", duration.String())
-	if explicitDelay {
-		fmt.Printf("  consumer delay: %s\n", delay.String())
-	} else {
-		fmt.Printf("  consumer delays: %s\n", formatDurationList(effectiveDelays))
-	}
+	fmt.Printf("  probe duration: %s\n", duration.String())
+	fmt.Printf("  payload size:   %s\n", formatBytes(payloadBytes))
 
 	recommendation, err := tuner.Tune(context.Background(), tuner.Options{
-		RepoRoot:       repoRoot,
-		SoakDuration:   *duration,
-		ConsumerDelay:  consumerDelayOverride(*delay, delays, explicitDelay),
-		ConsumerDelays: effectiveDelays,
-		TestTimeout:    *timeout,
-		BatchBytes:     defaultIfEmpty(batches, performance.TuneDefaultBatchCandidates()),
-		PendingBytes:   defaultIfEmpty(pending, performance.TuneDefaultPendingCandidates()),
+		PayloadBytes:  payloadBytes,
+		ProbeDuration: *duration,
 	})
 	if err != nil {
 		exitf("tune tempo: %v", err)
@@ -73,128 +40,100 @@ func main() {
 	if recommendation.TotalMemoryBytes > 0 {
 		fmt.Printf("  detected total memory: %s\n", formatBytes(int64(recommendation.TotalMemoryBytes)))
 	}
-	fmt.Println()
-	fmt.Printf("%-10s %-12s %-14s %-12s %-12s %-10s %-10s\n", "delay", "batch", "pending", "delivered/s", "peak heap", "rejected", "status")
-	for _, run := range recommendation.Runs {
-		fmt.Printf(
-			"%-10s %-12s %-14s %-12.0f %-12s %-10d %-10s\n",
-			run.Candidate.ConsumerDelay.String(),
-			formatBytes(run.Candidate.MaxBatchBytes),
-			formatBytes(run.Candidate.MaxBufferedBytes),
-			run.AvgDeliveredItemsPerSec,
-			formatBytes(int64(run.PeakHeapAllocBytes)),
-			run.Rejected,
-			run.OverallStatus,
-		)
-	}
 
-	best := recommendation.Best
+	fmt.Println()
+	fmt.Printf("observed\n")
+	fmt.Printf("  producers:             %d\n", recommendation.ProducerCount)
+	fmt.Printf("  observed items/sec:    %.0f\n", recommendation.ObservedItemsPerSec)
+	fmt.Printf("  observed bytes/sec:    %s/sec\n", formatBytes(int64(recommendation.ObservedBytesPerSec)))
+	fmt.Printf("  peak heap alloc:       %s\n", formatBytes(int64(recommendation.ObservedPeakHeapBytes)))
+	fmt.Printf("  peak buffered bytes:   %s\n", formatBytes(recommendation.ObservedPeakBuffered))
+	fmt.Printf("  queue-full rejections: %d\n", recommendation.Rejections)
+
 	fmt.Println()
 	fmt.Printf("recommended\n")
-	fmt.Printf("  ConsumerDelay:  %s\n", best.Candidate.ConsumerDelay)
-	fmt.Printf("  MaxBatchBytes:   %d // %s\n", best.Candidate.MaxBatchBytes, formatBytes(best.Candidate.MaxBatchBytes))
-	fmt.Printf("  MaxBufferedBytes: %d // %s\n", best.Candidate.MaxBufferedBytes, formatBytes(best.Candidate.MaxBufferedBytes))
-	fmt.Printf("  AvgDeliveredItemsPerSec: %.0f\n", best.AvgDeliveredItemsPerSec)
-	fmt.Printf("  PeakHeapAlloc: %s\n", formatBytes(int64(best.PeakHeapAllocBytes)))
-	fmt.Printf("  Rejected: %d\n", best.Rejected)
-	fmt.Printf("  Overall: %s\n", best.OverallStatus)
-
-	maybeWriteSettings(best)
-}
-
-func defaultIfEmpty(values, fallback []int64) []int64 {
-	if len(values) > 0 {
-		return values
+	fmt.Printf("  MaxBufferedBytes: %d // %s\n", recommendation.RecommendedMaxBuffered, formatBytes(recommendation.RecommendedMaxBuffered))
+	if recommendation.BatchShapingRecommended {
+		fmt.Printf("  MaxBatchBytes:    %d // %s\n", recommendation.RecommendedMaxBatch, formatBytes(recommendation.RecommendedMaxBatch))
+	} else {
+		fmt.Printf("  MaxBatchBytes:    0 // leave batch shaping disabled initially\n")
 	}
-	return append([]int64(nil), fallback...)
-}
-
-func defaultDurationsIfEmpty(values, fallback []time.Duration) []time.Duration {
-	if len(values) > 0 {
-		return values
+	fmt.Printf("  buffered items:   ~%d payloads\n", recommendation.BufferedItemCapacity)
+	if recommendation.EstimatedBurstWindow > 0 {
+		fmt.Printf("  burst headroom:   ~%s at observed top speed\n", recommendation.EstimatedBurstWindow.Round(100*time.Millisecond))
 	}
-	return append([]time.Duration(nil), fallback...)
-}
 
-func consumerDelayOverride(value time.Duration, delays []time.Duration, explicit bool) time.Duration {
-	if len(delays) > 0 || !explicit {
-		return 0
-	}
-	return value
-}
-
-func flagWasProvided(name string) bool {
-	provided := false
-	flag.Visit(func(f *flag.Flag) {
-		if f.Name == name {
-			provided = true
+	if len(recommendation.Notes) > 0 {
+		fmt.Println()
+		fmt.Printf("notes\n")
+		for _, note := range recommendation.Notes {
+			fmt.Printf("  - %s\n", note)
 		}
-	})
-	return provided
+	}
+
+	maybeWriteSettings(payloadBytes, recommendation)
 }
 
-func parseInt64List(raw string) ([]int64, error) {
-	if strings.TrimSpace(raw) == "" {
-		return nil, nil
+func resolvePayloadBytes(raw string) (int64, error) {
+	raw = strings.TrimSpace(raw)
+	if raw != "" {
+		return parseByteSize(raw)
 	}
-	parts := strings.Split(raw, ",")
-	out := make([]int64, 0, len(parts))
-	for _, part := range parts {
-		part = strings.TrimSpace(part)
-		if part == "" {
-			continue
-		}
-		value, err := strconv.ParseInt(part, 10, 64)
+
+	if isInteractiveTerminal() {
+		reader := bufio.NewReader(os.Stdin)
+		fmt.Printf("\napproximate size of one payload [default %s]: ", formatBytes(performance.TuneDefaultPayloadBytes()))
+		answer, err := reader.ReadString('\n')
 		if err != nil {
-			return nil, err
+			return 0, err
 		}
-		out = append(out, value)
-	}
-	return out, nil
-}
-
-func parseDurationList(raw string) ([]time.Duration, error) {
-	if strings.TrimSpace(raw) == "" {
-		return nil, nil
-	}
-	parts := strings.Split(raw, ",")
-	out := make([]time.Duration, 0, len(parts))
-	for _, part := range parts {
-		part = strings.TrimSpace(part)
-		if part == "" {
-			continue
+		answer = strings.TrimSpace(answer)
+		if answer == "" {
+			return performance.TuneDefaultPayloadBytes(), nil
 		}
-		value, err := time.ParseDuration(part)
-		if err != nil {
-			return nil, err
+		return parseByteSize(answer)
+	}
+
+	return performance.TuneDefaultPayloadBytes(), nil
+}
+
+func parseByteSize(raw string) (int64, error) {
+	s := strings.TrimSpace(strings.ToUpper(raw))
+	if s == "" {
+		return 0, fmt.Errorf("empty size")
+	}
+
+	multiplier := int64(1)
+	for _, suffix := range []struct {
+		Suffix string
+		Scale  int64
+	}{
+		{"GIB", tuner.GiB},
+		{"GB", 1000 * 1000 * 1000},
+		{"MIB", tuner.MiB},
+		{"MB", 1000 * 1000},
+		{"KIB", tuner.KiB},
+		{"KB", 1000},
+		{"B", 1},
+	} {
+		if strings.HasSuffix(s, suffix.Suffix) {
+			s = strings.TrimSpace(strings.TrimSuffix(s, suffix.Suffix))
+			multiplier = suffix.Scale
+			break
 		}
-		out = append(out, value)
 	}
-	return out, nil
+
+	value, err := strconv.ParseFloat(s, 64)
+	if err != nil {
+		return 0, err
+	}
+	if value <= 0 {
+		return 0, fmt.Errorf("size must be greater than zero")
+	}
+	return int64(value * float64(multiplier)), nil
 }
 
-func formatDurationList(values []time.Duration) string {
-	out := make([]string, len(values))
-	for i, value := range values {
-		out[i] = value.String()
-	}
-	return strings.Join(out, ", ")
-}
-
-func formatBytes(v int64) string {
-	switch {
-	case v >= tuner.GiB:
-		return fmt.Sprintf("%.2fGiB", float64(v)/float64(tuner.GiB))
-	case v >= tuner.MiB:
-		return fmt.Sprintf("%.2fMiB", float64(v)/float64(tuner.MiB))
-	case v >= tuner.KiB:
-		return fmt.Sprintf("%.2fKiB", float64(v)/float64(tuner.KiB))
-	default:
-		return fmt.Sprintf("%dB", v)
-	}
-}
-
-func maybeWriteSettings(best tuner.RunResult) {
+func maybeWriteSettings(payloadBytes int64, recommendation tuner.Recommendation) {
 	if !isInteractiveTerminal() {
 		return
 	}
@@ -203,6 +142,10 @@ func maybeWriteSettings(best tuner.RunResult) {
 	fmt.Print("\nwrite recommended settings to performance/settings.json? [y/N]: ")
 	answer, err := reader.ReadString('\n')
 	if err != nil {
+		if err == io.EOF {
+			fmt.Println("leaving performance/settings.json unchanged")
+			return
+		}
 		fmt.Fprintf(os.Stderr, "read answer: %v\n", err)
 		return
 	}
@@ -212,7 +155,7 @@ func maybeWriteSettings(best tuner.RunResult) {
 		return
 	}
 
-	path, err := performance.WriteTunedSettings(best.Candidate.ConsumerDelay, performance.SoakConfigFor(best.Candidate.MaxBatchBytes, best.Candidate.MaxBufferedBytes))
+	path, err := performance.WriteTunedSettings(payloadBytes, performance.SoakConfigFor(recommendation.RecommendedMaxBatch, recommendation.RecommendedMaxBuffered))
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "write settings: %v\n", err)
 		return
@@ -226,6 +169,19 @@ func isInteractiveTerminal() bool {
 		return false
 	}
 	return (info.Mode() & os.ModeCharDevice) != 0
+}
+
+func formatBytes(v int64) string {
+	switch {
+	case v >= tuner.GiB:
+		return fmt.Sprintf("%.2fGiB", float64(v)/float64(tuner.GiB))
+	case v >= tuner.MiB:
+		return fmt.Sprintf("%.2fMiB", float64(v)/float64(tuner.MiB))
+	case v >= tuner.KiB:
+		return fmt.Sprintf("%.2fKiB", float64(v)/float64(tuner.KiB))
+	default:
+		return fmt.Sprintf("%dB", v)
+	}
 }
 
 func exitf(format string, args ...interface{}) {
