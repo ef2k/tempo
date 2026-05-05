@@ -1,19 +1,22 @@
 # Performance
 
-This directory is for Tempo's performance harness.
+This directory is for Tempo's performance suite.
 
 The results here are machine-relative. A faster machine will produce higher
 throughput than a slower one. What matters most is:
 
 - what this machine can do
 - what settings are sane for this machine
-- whether Tempo still behaves correctly under pressure
+- whether correctness and recovery hold under pressure
 
 The main commands are:
 
 - `make tune`
+  recommends tailored settings for the current machine
 - `make soak`
+  ensures correctness and recovery under heavy backpressure
 - `make bench`
+  reports local throughput and allocation numbers
 
 ## `make tune`
 
@@ -25,17 +28,28 @@ recommends sane starting values for:
 - `MaxBufferedBytes`
 - optional `MaxBatchBytes`
 
+These bounds are the main controls under uneven load:
+
+- `MaxBufferedBytes` is the hard safety boundary
+- `Interval` is the flush guarantee
+- `MaxBatchBytes` is optional shaping for emitted work
+
 It also gives rough capacity information, such as observed throughput and
 buffer headroom for that payload size.
 
 The generated [settings.json](/Users/e/work/tempo/performance/settings.json:1)
-is meant to be local machine calibration state.
+stores the tuned defaults for this machine.
+
+Those settings are then used by the soak test to run with the recommended byte
+bounds while creating intentional backpressure. The goal is to show how much
+load can be sustained for payloads of roughly that size on your machine and to
+leave you with a practical starting point.
 
 ## `make soak`
 
 `make soak` is the pressure and recovery test.
 
-Its job is to create sustained backpressure (`P > C`) and prove that Tempo:
+Its job is to create sustained backpressure (`P > C`) and prove that it:
 
 - stays live under pressure
 - delivers all accepted items
@@ -60,12 +74,3 @@ Right now it is mainly useful as local engineering information:
 - rough items/sec
 - rough bytes/sec
 - allocations
-
-It is not yet a historical regression system by itself, because it is not
-currently tied to saved benchmark baselines.
-
-## How To Think About Them
-
-- `tune` answers: what should I configure on this machine?
-- `soak` answers: does Tempo still behave correctly under sustained pressure?
-- `bench` answers: what kind of throughput numbers are we seeing on this machine?
