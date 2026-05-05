@@ -19,6 +19,7 @@ stress:
 
 soak: SOAK_DURATION ?= 5m
 soak:
+	@test -f performance/settings.json || (echo "run 'make tune' first to generate performance/settings.json" && exit 1)
 	TEMPO_RUN_SOAK=1 TEMPO_SOAK_DURATION=$(SOAK_DURATION) go test -timeout 20m -v -run '^TestSoakSustainedLoadStaysHealthy$$' ./performance
 
 tune: TUNE_DURATION ?= 5s

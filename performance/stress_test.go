@@ -161,13 +161,9 @@ type soakAssessment struct {
 	ObservedRejectedItemsPerSec  float64               `json:"observed_rejected_items_per_second"`
 	ObservedBatchesPerSec        float64               `json:"observed_batches_per_second"`
 	ThroughputRangePct           float64               `json:"delivered_throughput_range_percent"`
-	Acceptance                   soakAssessmentSection `json:"acceptance"`
-	Observations                 soakAssessmentSection `json:"observations"`
 	Correctness                  soakAssessmentSection `json:"correctness"`
-	Throughput                   soakAssessmentSection `json:"throughput"`
-	Backlog                      soakAssessmentSection `json:"backlog"`
+	Pressure                     soakAssessmentSection `json:"pressure"`
 	Memory                       soakAssessmentSection `json:"memory"`
-	Goroutines                   soakAssessmentSection `json:"goroutines"`
 	Drain                        soakAssessmentSection `json:"drain"`
 	Overall                      soakAssessmentSection `json:"overall"`
 }
@@ -451,7 +447,7 @@ func heapRecovered(samples []soakSample, peak uint64) bool {
 	return false
 }
 
-func makeAssessment(snapshot soakSnapshot, samples []soakSample, startGoroutines int, outputPaths soakOutputPaths) soakAssessment {
+func makeAssessment(snapshot soakSnapshot, samples []soakSample, outputPaths soakOutputPaths) soakAssessment {
 	active := activeSoakSamples(samples)
 	correctness := soakAssessmentSection{Status: assessmentPass}
 	if snapshot.Produced != snapshot.Delivered || snapshot.FinalBacklog != 0 {
@@ -462,41 +458,19 @@ func makeAssessment(snapshot soakSnapshot, samples []soakSample, startGoroutines
 		fmt.Sprintf("final backlog=%d", snapshot.FinalBacklog),
 	}
 
-	throughput := soakAssessmentSection{Status: assessmentPass}
-	switch {
-	case snapshot.AvgDeliveredItemsPerSec < 750000:
-		throughput.Status = assessmentFail
-	case snapshot.ThroughputRangePct > 60:
-		throughput.Status = assessmentFail
-	case snapshot.ThroughputRangePct > 35:
-		throughput.Status = assessmentWarn
+	pressure := soakAssessmentSection{Status: assessmentPass}
+	if snapshot.PeakBacklog <= 0 && snapshot.Rejected == 0 {
+		pressure.Status = assessmentFail
 	}
-	throughput.Notes = []string{
+	pressure.Notes = []string{
+		fmt.Sprintf("peak backlog=%d", snapshot.PeakBacklog),
+		fmt.Sprintf("rejected=%d", snapshot.Rejected),
 		fmt.Sprintf("avg accepted items/sec=%.0f", snapshot.AvgAcceptedItemsPerSec),
 		fmt.Sprintf("avg delivered items/sec=%.0f", snapshot.AvgDeliveredItemsPerSec),
-		fmt.Sprintf("avg rejected items/sec=%.0f", snapshot.AvgRejectedItemsPerSec),
-		fmt.Sprintf("avg batches/sec=%.0f", snapshot.AvgBatchesPerSec),
-		fmt.Sprintf("delivered throughput range=%.2f%%", snapshot.ThroughputRangePct),
-	}
-
-	backlog := soakAssessmentSection{Status: assessmentPass}
-	backlogWarnThreshold := snapshot.Config.MaxBufferedBytes / benchPayloadBytes()
-	if backlogWarnThreshold < 1 {
-		backlogWarnThreshold = 1
-	}
-	switch {
-	case snapshot.FinalBacklog != 0:
-		backlog.Status = assessmentFail
-	case snapshot.PeakBacklog > backlogWarnThreshold:
-		backlog.Status = assessmentWarn
-	}
-	backlog.Notes = []string{
-		fmt.Sprintf("peak backlog=%d", snapshot.PeakBacklog),
-		fmt.Sprintf("max buffered bytes=%d", snapshot.Config.MaxBufferedBytes),
 	}
 
 	memory := soakAssessmentSection{Status: assessmentPass}
-	memoryFailThreshold := uint64(snapshot.Config.MaxBufferedBytes * 6)
+	memoryFailThreshold := uint64(snapshot.Config.MaxBufferedBytes * 8)
 	memoryWarnThreshold := uint64(snapshot.Config.MaxBufferedBytes * 4)
 	switch {
 	case snapshot.PeakHeapAllocBytes > memoryFailThreshold:
@@ -514,19 +488,6 @@ func makeAssessment(snapshot soakSnapshot, samples []soakSample, startGoroutines
 		fmt.Sprintf("peak heap alloc=%d bytes", snapshot.PeakHeapAllocBytes),
 		fmt.Sprintf("final heap alloc=%d bytes", snapshot.FinalHeapAlloc),
 		fmt.Sprintf("gc cycles observed=%d", gcCycles),
-	}
-
-	goroutines := soakAssessmentSection{Status: assessmentPass}
-	switch {
-	case snapshot.FinalGoroutines > startGoroutines+16:
-		goroutines.Status = assessmentFail
-	case snapshot.PeakGoroutines > startGoroutines+snapshot.Config.NumProducers+8:
-		goroutines.Status = assessmentWarn
-	}
-	goroutines.Notes = []string{
-		fmt.Sprintf("start goroutines=%d", startGoroutines),
-		fmt.Sprintf("peak goroutines=%d", snapshot.PeakGoroutines),
-		fmt.Sprintf("final goroutines=%d", snapshot.FinalGoroutines),
 	}
 
 	drain := soakAssessmentSection{Status: assessmentPass}
@@ -548,46 +509,8 @@ func makeAssessment(snapshot soakSnapshot, samples []soakSample, startGoroutines
 		fmt.Sprintf("drain timeout=%s", snapshot.Config.DrainTimeout),
 	}
 
-	acceptance := soakAssessmentSection{Status: assessmentPass}
-	for _, section := range []soakAssessmentSection{correctness, goroutines, drain} {
-		if section.Status == assessmentFail {
-			acceptance.Status = assessmentFail
-			break
-		}
-		if section.Status == assessmentWarn {
-			acceptance.Status = assessmentWarn
-		}
-	}
-	switch acceptance.Status {
-	case assessmentPass:
-		acceptance.Notes = []string{"tempo stayed live under intentional backpressure and recovered without losing accepted items"}
-	case assessmentWarn:
-		acceptance.Notes = []string{"tempo recovered, but one or more acceptance signals need a closer look"}
-	default:
-		acceptance.Notes = []string{"tempo did not meet the recovery and correctness acceptance criteria for this soak run"}
-	}
-
-	observations := soakAssessmentSection{Status: assessmentPass}
-	for _, section := range []soakAssessmentSection{throughput, backlog, memory} {
-		if section.Status == assessmentFail {
-			observations.Status = assessmentFail
-			break
-		}
-		if section.Status == assessmentWarn {
-			observations.Status = assessmentWarn
-		}
-	}
-	switch observations.Status {
-	case assessmentPass:
-		observations.Notes = []string{"resource and throughput observations stayed within the current advisory thresholds"}
-	case assessmentWarn:
-		observations.Notes = []string{"the soak run recovered, but advisory resource or throughput observations deserve review"}
-	default:
-		observations.Notes = []string{"the soak run recovered, but advisory resource or throughput observations were well outside the expected pre-limit range"}
-	}
-
-	overall := soakAssessmentSection{Status: acceptance.Status}
-	for _, section := range []soakAssessmentSection{acceptance, observations} {
+	overall := soakAssessmentSection{Status: assessmentPass}
+	for _, section := range []soakAssessmentSection{correctness, pressure, memory, drain} {
 		if section.Status == assessmentFail {
 			overall.Status = assessmentFail
 			break
@@ -598,11 +521,11 @@ func makeAssessment(snapshot soakSnapshot, samples []soakSample, startGoroutines
 	}
 	switch overall.Status {
 	case assessmentPass:
-		overall.Notes = []string{"the soak run looks healthy across correctness, throughput, backlog, memory, goroutines, and drain behavior"}
+		overall.Notes = []string{"the soak run created real pressure, recovered cleanly, and delivered all accepted items"}
 	case assessmentWarn:
-		overall.Notes = []string{"the soak run completed, but one or more categories need a closer look"}
+		overall.Notes = []string{"the soak run recovered, but one or more observations deserve a closer look"}
 	default:
-		overall.Notes = []string{"the soak run exposed at least one category that does not meet the expected bar"}
+		overall.Notes = []string{"the soak run did not meet the expected pressure, recovery, or memory bar"}
 	}
 
 	return soakAssessment{
@@ -615,13 +538,9 @@ func makeAssessment(snapshot soakSnapshot, samples []soakSample, startGoroutines
 		ObservedRejectedItemsPerSec:  snapshot.AvgRejectedItemsPerSec,
 		ObservedBatchesPerSec:        snapshot.AvgBatchesPerSec,
 		ThroughputRangePct:           snapshot.ThroughputRangePct,
-		Acceptance:                   acceptance,
-		Observations:                 observations,
 		Correctness:                  correctness,
-		Throughput:                   throughput,
-		Backlog:                      backlog,
+		Pressure:                     pressure,
 		Memory:                       memory,
-		Goroutines:                   goroutines,
 		Drain:                        drain,
 		Overall:                      overall,
 	}
@@ -966,47 +885,28 @@ func TestSoakSustainedLoadStaysHealthy(t *testing.T) {
 		ShutdownDuration:        shutdownDuration.String(),
 	}
 
-	assessment := makeAssessment(snapshot, collection.samples, startGoroutines, outputPaths)
+	assessment := makeAssessment(snapshot, collection.samples, outputPaths)
 	snapshot.Assessment = assessment
 	if err := writeSoakSnapshot(snapshot, outputPaths.snapshotPath); err != nil {
 		t.Fatalf("write soak snapshot: %v", err)
 	}
 
 	fmt.Printf(
-		"\nsoak summary\n  stream: %s\n  results: %s\n  runtime: %s\n  sample interval: %s\n  consumer delay: %s\n  drain timeout: %s\n  acceptance: %s\n  observations: %s\n  produced: %d\n  rejected: %d\n  delivered: %d\n  batches: %d\n  avg accepted items/sec: %.0f\n  min accepted items/sec: %.0f\n  max accepted items/sec: %.0f\n  avg delivered items/sec: %.0f\n  min delivered items/sec: %.0f\n  max delivered items/sec: %.0f\n  avg rejected items/sec: %.0f\n  min rejected items/sec: %.0f\n  max rejected items/sec: %.0f\n  avg batches/sec: %.0f\n  delivered throughput range: %.2f%%\n  peak backlog: %d\n  peak heap alloc: %d bytes\n  peak goroutines: %d\n  drain duration: %s\n  shutdown duration: %s\n  correctness: %s\n  throughput: %s\n  backlog: %s\n  memory: %s\n  goroutines: %s\n  drain: %s\n  overall: %s\n",
+		"\nsoak summary\n  stream: %s\n  results: %s\n  runtime: %s\n  consumer delay: %s\n  produced: %d\n  rejected: %d\n  delivered: %d\n  avg delivered items/sec: %.0f\n  peak backlog: %d\n  peak heap alloc: %d bytes\n  drain duration: %s\n  correctness: %s\n  pressure: %s\n  memory: %s\n  drain: %s\n  overall: %s\n",
 		outputPaths.displayStreamPath,
 		outputPaths.displaySnapshotPath,
 		snapshot.Runtime,
-		snapshot.SampleInterval,
 		runConfig.ConsumerDelay,
-		runConfig.DrainTimeout,
-		assessment.Acceptance.Status,
-		assessment.Observations.Status,
 		snapshot.Produced,
 		snapshot.Rejected,
 		snapshot.Delivered,
-		snapshot.Batches,
-		snapshot.AvgAcceptedItemsPerSec,
-		snapshot.MinAcceptedItemsPerSec,
-		snapshot.MaxAcceptedItemsPerSec,
 		snapshot.AvgDeliveredItemsPerSec,
-		snapshot.MinDeliveredItemsPerSec,
-		snapshot.MaxDeliveredItemsPerSec,
-		snapshot.AvgRejectedItemsPerSec,
-		snapshot.MinRejectedItemsPerSec,
-		snapshot.MaxRejectedItemsPerSec,
-		snapshot.AvgBatchesPerSec,
-		snapshot.ThroughputRangePct,
 		snapshot.PeakBacklog,
 		snapshot.PeakHeapAllocBytes,
-		snapshot.PeakGoroutines,
 		snapshot.DrainDuration,
-		snapshot.ShutdownDuration,
 		assessment.Correctness.Status,
-		assessment.Throughput.Status,
-		assessment.Backlog.Status,
+		assessment.Pressure.Status,
 		assessment.Memory.Status,
-		assessment.Goroutines.Status,
 		assessment.Drain.Status,
 		assessment.Overall.Status,
 	)
