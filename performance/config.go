@@ -112,7 +112,7 @@ func PerformanceSettingsPath() (string, error) {
 	return settingsPath()
 }
 
-func WriteTunedSettings(payloadBytes int64, cfg tempo.Config) (string, error) {
+func WriteTunedSettings(payloadBytes int64, delay time.Duration, cfg tempo.Config) (string, error) {
 	settings, err := loadPerformanceSettings()
 	if err != nil {
 		return "", err
@@ -125,6 +125,9 @@ func WriteTunedSettings(payloadBytes int64, cfg tempo.Config) (string, error) {
 	settings.SoakDefaults.MaxBatchBytes = cfg.MaxBatchBytes
 	settings.SoakDefaults.MaxBufferedBytes = cfg.MaxBufferedBytes
 	settings.SoakDefaults.Interval = cfg.Interval.String()
+	if delay > 0 {
+		settings.SoakDefaults.ConsumerDelay = delay.String()
+	}
 	if payloadBytes > 0 {
 		settings.TuneDefaults.PayloadBytes = payloadBytes
 	}

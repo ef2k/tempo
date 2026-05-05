@@ -29,3 +29,4 @@ tune:
 
 clean:
 	rm -rf performance/out
+	rm -f performance/settings.json
