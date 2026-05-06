@@ -12,7 +12,7 @@ throughput than a slower one. What matters most is:
 The main commands are:
 
 - `make tune`
-  recommends tailored settings for the current machine
+  recommends calibrated settings for the current machine
 - `make soak`
   ensures correctness and recovery under heavy backpressure
 - `make bench`

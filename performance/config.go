@@ -16,18 +16,10 @@ const benchmarkMaxBufferedBytes = 1 * tempo.GiB
 const syntheticBenchPayloadBytes int64 = 7
 
 type performanceSettings struct {
-	MachineBaseline   machineBaselineSettings   `json:"machine_baseline"`
 	BenchmarkDefaults benchmarkDefaultsSettings `json:"benchmark_defaults"`
 	StressDefaults    stressDefaultsSettings    `json:"stress_defaults"`
 	SoakDefaults      soakDefaultsSettings      `json:"soak_defaults"`
 	TuneDefaults      tuneDefaultsSettings      `json:"tune_defaults"`
-}
-
-type machineBaselineSettings struct {
-	Name        string `json:"name"`
-	CPU         string `json:"cpu"`
-	MemoryBytes int64  `json:"memory_bytes"`
-	OS          string `json:"os"`
 }
 
 type benchmarkDefaultsSettings struct {
@@ -56,13 +48,6 @@ type soakDefaultsSettings struct {
 type tuneDefaultsSettings struct {
 	Duration     string `json:"duration"`
 	PayloadBytes int64  `json:"payload_bytes"`
-}
-
-type machineBaseline struct {
-	Name        string
-	CPU         string
-	MemoryBytes int64
-	OS          string
 }
 
 var (
@@ -148,12 +133,6 @@ func WriteTunedSettings(payloadBytes int64, delay time.Duration, cfg tempo.Confi
 
 func defaultPerformanceSettings() performanceSettings {
 	return performanceSettings{
-		MachineBaseline: machineBaselineSettings{
-			Name:        "apple-m4-16gb",
-			CPU:         "Apple M4",
-			MemoryBytes: 16 * tempo.GiB,
-			OS:          "macOS",
-		},
 		BenchmarkDefaults: benchmarkDefaultsSettings{
 			IntervalSweep:       []string{"100us", "1ms", "10ms", "100ms"},
 			ProducerParallelism: []int{1, 4, 16, 64, 256},
@@ -178,16 +157,6 @@ func defaultPerformanceSettings() performanceSettings {
 			Duration:     (5 * time.Second).String(),
 			PayloadBytes: 1024,
 		},
-	}
-}
-
-func TunedMachineBaseline() machineBaseline {
-	cfg, _ := loadPerformanceSettings()
-	return machineBaseline{
-		Name:        cfg.MachineBaseline.Name,
-		CPU:         cfg.MachineBaseline.CPU,
-		MemoryBytes: cfg.MachineBaseline.MemoryBytes,
-		OS:          cfg.MachineBaseline.OS,
 	}
 }
 
