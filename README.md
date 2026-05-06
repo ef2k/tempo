@@ -37,9 +37,10 @@ one. It is a narrow dispatcher for batching events well.
 **Performance**
 
 Tempo is meant to stay in-process and close to application code. As a realistic
-lower bound, I ran tempo on a little 8GB Raspberry Pi and it sustained
-`242k events/sec` during a 5-minute soak with `~10KiB` payloads and
-intentional backpressure. Not bad for a little package.
+lower bound, I ran Tempo on an 8GB Raspberry Pi 4 Model B for a 5-minute soak
+with `~10KiB` payloads and intentional backpressure. It sustained about
+`244k delivered events/sec`, delivered `73.1M` events with zero rejections,
+peaked at roughly `3.5 MiB` of heap allocation, and drained in `118µs`.
 
 Of course, this doesn't prove an entire telemetry pipeline can run on a
 Raspberry Pi, but it does show that the queueing and batching layer is unlikely to be a bottleneck in real deployments.
