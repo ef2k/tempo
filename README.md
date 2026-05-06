@@ -1,79 +1,59 @@
 # tempo
 
-[![Go
-Reference](https://pkg.go.dev/badge/github.com/ef2k/tempo.svg)](https://pkg.go.dev/github.com/ef2k/tempo)
-[![Go Report
-Card](https://goreportcard.com/badge/github.com/ef2k/tempo)](https://goreportcard.com/report/github.com/ef2k/tempo)
+Tempo batches high-volume events in memory so downstream systems can handle them in manageable batches instead of one at a time.
 
+It runs in-process as part of an application, covering the cases where a
+dispatcher is enough and a heavier system like Kafka or RabbitMQ would be more
+infrastructure than the job really needs.
 
-Tempo is an in-process event batcher for high-frequency workloads.
+**Useful for**
 
-It collects events in memory and emits them in batches instead of processing
-each one immediately. That matters when events arrive quickly and the real cost
-is downstream: database writes, API calls, system calls, or any other fixed
-per-event overhead.
+Tempo is useful anywhere events arrive faster than downstream work should be
+performed.
 
-Tempo is meant for the gap between "send everything one by one" and "bring in a
-full messaging system." It gives you bounded buffering, timed flushes, and
-batch shaping in a small local component.
+- telemetry and analytics pipelines that want to batch writes before handing
+  them to storage
+- API clients that benefit from sending grouped work instead of one request per
+  event
+- logging, tracing, and agent-style workloads that produce bursts inside a
+  single process
+- applications that need backpressure and bounded memory without introducing a
+  separate queueing system
 
-In the current performance suite, an 8GB Raspberry Pi sustained about `242k
-events/sec` during a 5-minute soak run with `~10KiB` payloads while delivering
-all accepted items and staying within a small tuned memory budget. That does
-not make the rest of a telemetry pipeline free, but it does show that the
-queueing and batching layer itself is unlikely to be the bottleneck in many
-real deployments.
+**Narrow by design**
 
-If a single payload is larger than `MaxBatchBytes` but still fits within
-`MaxBufferedBytes`, Tempo accepts it and flushes it as a one-item batch. Only
-payloads that exceed `MaxBufferedBytes` are rejected.
+I built this package for my own telemetry needs, and that shapes its scope.
+Tempo is not a broker or a distributed queue, and it is not meant to grow into
+one. It is a narrow dispatcher for batching events well.
 
-Admission is based on both total fit and current free space:
+**Features**
 
-- if a payload is larger than `MaxBufferedBytes`, it is rejected with
-  `ErrPayloadTooLarge`
-- if a payload would fit within `MaxBufferedBytes` in principle, but there is
-  not enough pending space available right now, it is rejected with
-  `ErrQueueFull`
+- bounded in-memory buffering via `MaxBufferedBytes`
+- timed flushes via `Interval`
+- optional batch-size shaping via `MaxBatchBytes`
+- graceful draining with `Shutdown`
+- explicit failures with `ErrQueueFull` and `ErrPayloadTooLarge`
 
-Use it for:
-- analytics and telemetry ingestion
-- external API batching
-- agent and LLM event collection
+**Performance**
+
+Tempo is meant to stay in-process and close to application code. As a realistic
+lower bound, I ran tempo on a little 8GB Raspberry Pi and it sustained
+`242k events/sec` during a 5-minute soak with `~10KiB` payloads and
+intentional backpressure. Not bad for a little package.
+
+Of course, this doesn't prove an entire telemetry pipeline can run on a
+Raspberry Pi, but it does show that the queueing and batching layer is unlikely to be a bottleneck in real deployments.
+
+The repo also includes a correctness-focused test suite and machine-relative performance suite for tuning, soak testing, and benchmarking.
+
+You can learn more about included soaks and benchmarks in [performance/README.md](./performance/README.md).
 
 ## Install
+
 ```sh
 go get github.com/ef2k/tempo
 ```
 
 ## Documentation
+
 [pkg.go.dev/github.com/ef2k/tempo](https://pkg.go.dev/github.com/ef2k/tempo)
-
-## Configuration
-
-```go
-d, err := tempo.NewDispatcher(&tempo.Config{
-    Interval:         30 * time.Second,
-    MaxBatchBytes:    10 * tempo.MiB,
-    MaxBufferedBytes: 500 * tempo.MiB,
-})
-```
-
-This means:
-
-- flush whatever is buffered every 30 seconds
-- prefer batches up to 10 MiB
-- never let Tempo own more than 500 MiB of payload data
-
-If you do not need batch-size shaping, you can leave `MaxBatchBytes` unset and
-let Tempo flush by `Interval` while `MaxBufferedBytes` remains the hard safety
-boundary.
-
-
-## Sample Usage
-
-See `examples/` for working code.
-
-## Contribute
-
-Improvements, fixes, and feedback are welcome.
