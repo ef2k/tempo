@@ -17,7 +17,7 @@ Tempo is meant for the gap between "send everything one by one" and "bring in a
 full messaging system." It gives you bounded buffering, timed flushes, and
 batch shaping in a small local component.
 
-In the current performance suite, a Raspberry Pi sustained about `242k
+In the current performance suite, an 8GB Raspberry Pi sustained about `242k
 events/sec` during a 5-minute soak run with `~10KiB` payloads while delivering
 all accepted items and staying within a small tuned memory budget. That does
 not make the rest of a telemetry pipeline free, but it does show that the
