@@ -41,8 +41,6 @@ Use it for:
 - external API batching
 - agent and LLM event collection
 
-![3s demo](./examples/basic-3s-interval/tempo-3s.gif)
-
 ## Install
 ```sh
 go get github.com/ef2k/tempo
