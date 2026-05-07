@@ -67,3 +67,39 @@ go get github.com/ef2k/tempo
 ## Documentation
 
 [pkg.go.dev/github.com/ef2k/tempo](https://pkg.go.dev/github.com/ef2k/tempo)
+
+## Usage
+
+```go
+import (
+	"context"
+	"time"
+
+	"github.com/ef2k/tempo"
+)
+
+// Create a dispatcher with a flush interval and byte limits
+d, _ := tempo.NewDispatcher(&tempo.Config{
+	Interval:         250 * time.Millisecond,
+	MaxBatchBytes:    32 * tempo.KiB,
+	MaxBufferedBytes: 4 * tempo.MiB,
+})
+
+// Start the dispatcher loop
+go d.Start()
+
+// Read emitted batches and handle them synchronously
+go func() {
+	for batch := range d.Batches() {
+		// Do something with the batch
+		_ = batch
+	}
+}()
+
+// Enqueue individual payloads for batching
+_ = d.Enqueue([]byte("first event"))
+_ = d.Enqueue([]byte("second event"))
+
+// Shutdown drains all accepted items before returning
+_ = d.Shutdown(context.Background())
+```
