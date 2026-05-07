@@ -62,6 +62,29 @@ still make sense when the system is under stress.
 The soak uses a telemetry-shaped payload mix so the pressure is closer to a
 real event stream than a tiny synthetic message loop.
 
+Note: `make soak` intentionally drives overload, so seeing rejected items is
+expected. Rejected items are records that were not accepted at the `Enqueue`
+step because the queue was full.
+
+Keep the bigger picture in mind: these runs are performed at the absolute
+limits of the system. If you are likely to reach those limits in real use, use
+the throughput shown for your machine as a guide and plan accordingly.
+
+How rejected items are handled is outside the scope of this package. If your
+workload cannot tolerate loss under overload, you will need to mitigate it in
+your application or system design. One practical option is to save rejected
+items to disk and use a worker to retry them later or process them separately.
+
+## Interpreting Results
+
+When reviewing the accepted and delivered totals, compare them with `avg
+delivered items/sec`. That throughput is the best steady delivery rate observed
+while the system was running at its limit.
+
+If you expect your workload to exceed that rate, you should either run on
+stronger hardware or decide how your system will handle rejected items when the
+queue is full.
+
 ## `make bench`
 
 `make bench` is the raw throughput snapshot.

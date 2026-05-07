@@ -173,6 +173,13 @@ type soakAssessmentSection struct {
 	Notes  []string         `json:"notes"`
 }
 
+func summarizeAssessment(section soakAssessmentSection) string {
+	if len(section.Notes) == 0 {
+		return string(section.Status)
+	}
+	return fmt.Sprintf("%s, %s", section.Status, section.Notes[0])
+}
+
 type soakCollection struct {
 	samples            []soakSample
 	peakBacklog        int64
@@ -447,6 +454,14 @@ func heapRecovered(samples []soakSample, peak uint64) bool {
 	return false
 }
 
+func rejectionPct(produced, rejected int64) float64 {
+	attempts := produced + rejected
+	if attempts <= 0 {
+		return 0
+	}
+	return (float64(rejected) / float64(attempts)) * 100
+}
+
 func makeAssessment(snapshot soakSnapshot, samples []soakSample, outputPaths soakOutputPaths) soakAssessment {
 	active := activeSoakSamples(samples)
 	correctness := soakAssessmentSection{Status: assessmentPass}
@@ -464,7 +479,7 @@ func makeAssessment(snapshot soakSnapshot, samples []soakSample, outputPaths soa
 	}
 	pressure.Notes = []string{
 		fmt.Sprintf("peak backlog=%d", snapshot.PeakBacklog),
-		fmt.Sprintf("rejected=%d", snapshot.Rejected),
+		fmt.Sprintf("rejected=%d (%.2f%% of enqueue attempts)", snapshot.Rejected, rejectionPct(snapshot.Produced, snapshot.Rejected)),
 		fmt.Sprintf("avg accepted items/sec=%.0f", snapshot.AvgAcceptedItemsPerSec),
 		fmt.Sprintf("avg delivered items/sec=%.0f", snapshot.AvgDeliveredItemsPerSec),
 	}
@@ -892,22 +907,26 @@ func TestSoakSustainedLoadStaysHealthy(t *testing.T) {
 	}
 
 	fmt.Printf(
-		"\nsoak summary\n  stream: %s\n  results: %s\n  runtime: %s\n  consumer delay: %s\n  produced: %d\n  rejected: %d\n  delivered: %d\n  avg delivered items/sec: %.0f\n  peak backlog: %d\n  peak heap alloc: %d bytes\n  drain duration: %s\n  correctness: %s\n  pressure: %s\n  memory: %s\n  drain: %s\n  overall: %s\n",
+		"\nsoak summary\n  stream: %s\n  results: %s\n  runtime: %s\n  consumer delay: %s\n  throughput:\n    avg accepted items/sec: %.0f\n    avg delivered items/sec: %.0f\n    avg rejected items/sec: %.0f\n    avg batches/sec: %.0f\n  totals:\n    produced: %d\n    rejected: %d (%.2f%% of enqueue attempts)\n    delivered: %d\n  pressure shape:\n    peak backlog: %d\n    peak heap alloc: %d bytes\n    drain duration: %s\n  correctness: %s\n  pressure: %s\n  memory: %s\n  drain: %s\n  overall: %s\n",
 		outputPaths.displayStreamPath,
 		outputPaths.displaySnapshotPath,
 		snapshot.Runtime,
 		runConfig.ConsumerDelay,
+		snapshot.AvgAcceptedItemsPerSec,
+		snapshot.AvgDeliveredItemsPerSec,
+		snapshot.AvgRejectedItemsPerSec,
+		snapshot.AvgBatchesPerSec,
 		snapshot.Produced,
 		snapshot.Rejected,
+		rejectionPct(snapshot.Produced, snapshot.Rejected),
 		snapshot.Delivered,
-		snapshot.AvgDeliveredItemsPerSec,
 		snapshot.PeakBacklog,
 		snapshot.PeakHeapAllocBytes,
 		snapshot.DrainDuration,
-		assessment.Correctness.Status,
-		assessment.Pressure.Status,
-		assessment.Memory.Status,
-		assessment.Drain.Status,
-		assessment.Overall.Status,
+		summarizeAssessment(assessment.Correctness),
+		summarizeAssessment(assessment.Pressure),
+		summarizeAssessment(assessment.Memory),
+		summarizeAssessment(assessment.Drain),
+		summarizeAssessment(assessment.Overall),
 	)
 }

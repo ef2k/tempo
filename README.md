@@ -34,6 +34,15 @@ one. It is a narrow dispatcher for batching events well.
 - graceful draining with `Shutdown`
 - explicit failures with `ErrQueueFull` and `ErrPayloadTooLarge`
 
+**Reliability**
+
+Tempo is a bounded in-memory dispatcher. When the queue is full, `Enqueue`
+returns `ErrQueueFull` and the item is not accepted. Tempo guarantees clean
+drain for accepted items, but it does not provide durable storage or automatic
+replay for rejected ones. If your workload cannot tolerate loss under
+overload, handle `ErrQueueFull` in the caller and route those records through a
+durable fallback.
+
 **Performance**
 
 Tempo is meant to stay in-process and close to application code. As a realistic
