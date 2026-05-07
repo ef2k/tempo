@@ -7,7 +7,7 @@ import (
 
 func TestProbeProducerCandidatesAddHigherPressureOptions(t *testing.T) {
 	got := probeProducerCandidates(40)
-	want := []int{40, 80, 160}
+	want := []int{1, 2, 20, 40, 80, 160}
 
 	if len(got) != len(want) {
 		t.Fatalf("candidate count = %d, want %d (%v)", len(got), len(want), got)
@@ -22,13 +22,13 @@ func TestProbeProducerCandidatesAddHigherPressureOptions(t *testing.T) {
 func TestProbeDelayCandidatesReachMillisecondBackpressure(t *testing.T) {
 	got := probeDelayCandidates()
 	want := []time.Duration{
+		0,
 		10 * time.Microsecond,
 		50 * time.Microsecond,
 		200 * time.Microsecond,
 		500 * time.Microsecond,
 		1 * time.Millisecond,
 		2 * time.Millisecond,
-		0,
 	}
 
 	if len(got) != len(want) {

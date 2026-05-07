@@ -515,7 +515,12 @@ func recommendedProducerCount() int {
 }
 
 func probeProducerCandidates(base int) []int {
-	candidates := []int{base}
+	candidates := []int{
+		1,
+		2,
+		maxInt(1, base/2),
+		base,
+	}
 	if base < 256 {
 		candidates = append(candidates, minInt(base*2, 256))
 	}
@@ -536,13 +541,13 @@ func probeProducerCandidates(base int) []int {
 
 func probeDelayCandidates() []time.Duration {
 	return []time.Duration{
+		0,
 		10 * time.Microsecond,
 		50 * time.Microsecond,
 		200 * time.Microsecond,
 		500 * time.Microsecond,
 		1 * time.Millisecond,
 		2 * time.Millisecond,
-		0,
 	}
 }
 
@@ -661,6 +666,13 @@ func maxInt64(a, b int64) int64 {
 
 func minInt(a, b int) int {
 	if a < b {
+		return a
+	}
+	return b
+}
+
+func maxInt(a, b int) int {
+	if a > b {
 		return a
 	}
 	return b
