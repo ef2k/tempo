@@ -339,7 +339,7 @@ func runProbeStep(ctx context.Context, cfg probeConfig) (ProbeRun, error) {
 		return ProbeRun{}, err
 	}
 
-	healthy := result.rejectionRate <= 0.01 && !result.timedOut
+	healthy := result.rejections == 0 && !result.timedOut
 	return ProbeRun{
 		ProducerCount:    cfg.ProducerCount,
 		ConsumerDelay:    cfg.ConsumerDelay,
@@ -516,8 +516,11 @@ func recommendedProducerCount() int {
 
 func probeProducerCandidates(base int) []int {
 	candidates := []int{base}
-	if base < 128 {
-		candidates = append(candidates, minInt(base*2, 128))
+	if base < 256 {
+		candidates = append(candidates, minInt(base*2, 256))
+	}
+	if base < 256 {
+		candidates = append(candidates, minInt(base*4, 256))
 	}
 	out := make([]int, 0, len(candidates))
 	seen := map[int]bool{}
@@ -536,12 +539,15 @@ func probeDelayCandidates() []time.Duration {
 		10 * time.Microsecond,
 		50 * time.Microsecond,
 		200 * time.Microsecond,
+		500 * time.Microsecond,
+		1 * time.Millisecond,
+		2 * time.Millisecond,
 		0,
 	}
 }
 
 func minimumBufferedBudget(payloadBytes int64) int64 {
-	floor := roundToMiB(maxInt64(4*MiB, payloadBytes*256))
+	floor := roundToMiB(maxInt64(1*MiB, payloadBytes*128))
 	if floor < 1*MiB {
 		return 1 * MiB
 	}
