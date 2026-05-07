@@ -37,8 +37,7 @@ These bounds are the main controls under uneven load:
 It also gives rough capacity information, such as observed throughput and
 buffer headroom for that payload size.
 
-The generated [settings.json](/Users/e/work/tempo/performance/settings.json:1)
-stores the tuned defaults for this machine.
+The generated `settings.json` stores the tuned defaults for this machine.
 
 Those settings are then used by the soak test to run with the recommended byte
 bounds while creating intentional backpressure. The goal is to show how much
@@ -75,7 +74,7 @@ workload cannot tolerate loss under overload, you will need to mitigate it in
 your application or system design. One practical option is to save rejected
 items to disk and use a worker to retry them later or process them separately.
 
-## Interpreting Results
+**Interpreting Results**
 
 When reviewing the accepted and delivered totals, compare them with `avg
 delivered items/sec`. That throughput is the best steady delivery rate observed
