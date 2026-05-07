@@ -155,7 +155,7 @@ func defaultPerformanceSettings() performanceSettings {
 		},
 		TuneDefaults: tuneDefaultsSettings{
 			Duration:     (5 * time.Second).String(),
-			PayloadBytes: 1024,
+			PayloadBytes: 10 * tempo.KiB,
 		},
 	}
 }
@@ -230,7 +230,7 @@ func TuneDefaultDuration() time.Duration {
 func TuneDefaultPayloadBytes() int64 {
 	cfg, _ := loadPerformanceSettings()
 	if cfg.TuneDefaults.PayloadBytes <= 0 {
-		return 1024
+		return 10 * tempo.KiB
 	}
 	return cfg.TuneDefaults.PayloadBytes
 }
