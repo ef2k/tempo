@@ -1,6 +1,7 @@
 # Performance
 
-This directory is for Tempo's performance suite.
+This directory is for Tempo's performance suite. To run them use the make
+commands listed below.
 
 The results here are machine-relative. A faster machine will produce higher
 throughput than a slower one. What matters most is:
