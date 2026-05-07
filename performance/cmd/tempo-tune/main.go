@@ -5,7 +5,6 @@ import (
 	"context"
 	"flag"
 	"fmt"
-	"io"
 	"os"
 	"strconv"
 	"strings"
@@ -53,23 +52,22 @@ func main() {
 	fmt.Println()
 	if recommendation.Calibrated {
 		fmt.Printf("recommended\n")
-		fmt.Printf("  ConsumerDelay:    %s\n", recommendation.RecommendedDelay)
-		fmt.Printf("  MaxBufferedBytes: %d // %s\n", recommendation.RecommendedMaxBuffered, formatBytes(recommendation.RecommendedMaxBuffered))
-		if recommendation.BatchShapingRecommended {
-			fmt.Printf("  MaxBatchBytes:    %d // %s\n", recommendation.RecommendedMaxBatch, formatBytes(recommendation.RecommendedMaxBatch))
-		} else {
-			fmt.Printf("  MaxBatchBytes:    0 // leave batch shaping disabled initially\n")
-		}
-		fmt.Printf("  buffered items:   ~%d payloads\n", recommendation.BufferedItemCapacity)
-		if recommendation.EstimatedBurstWindow > 0 {
-			fmt.Printf("  burst headroom:   ~%s at observed top speed\n", recommendation.EstimatedBurstWindow.Round(100*time.Millisecond))
-		}
-		if recommendation.EdgeFound && recommendation.FailureBufferedBytes > 0 {
-			fmt.Printf("  edge found near:  %s\n", formatBytes(recommendation.FailureBufferedBytes))
-		}
 	} else {
-		fmt.Printf("recommendation\n")
-		fmt.Printf("  no tuned settings recommended yet\n")
+		fmt.Printf("provisional\n")
+	}
+	fmt.Printf("  ConsumerDelay:    %s\n", recommendation.RecommendedDelay)
+	fmt.Printf("  MaxBufferedBytes: %d // %s\n", recommendation.RecommendedMaxBuffered, formatBytes(recommendation.RecommendedMaxBuffered))
+	if recommendation.BatchShapingRecommended {
+		fmt.Printf("  MaxBatchBytes:    %d // %s\n", recommendation.RecommendedMaxBatch, formatBytes(recommendation.RecommendedMaxBatch))
+	} else {
+		fmt.Printf("  MaxBatchBytes:    0 // leave batch shaping disabled initially\n")
+	}
+	fmt.Printf("  buffered items:   ~%d payloads\n", recommendation.BufferedItemCapacity)
+	if recommendation.EstimatedBurstWindow > 0 {
+		fmt.Printf("  burst headroom:   ~%s at observed top speed\n", recommendation.EstimatedBurstWindow.Round(100*time.Millisecond))
+	}
+	if recommendation.EdgeFound && recommendation.FailureBufferedBytes > 0 {
+		fmt.Printf("  edge found near:  %s\n", formatBytes(recommendation.FailureBufferedBytes))
 	}
 
 	if len(recommendation.Notes) > 0 {
@@ -80,7 +78,15 @@ func main() {
 		}
 	}
 
-	maybeWriteSettings(payloadBytes, recommendation)
+	path, err := writeSettings(payloadBytes, recommendation)
+	if err != nil {
+		exitf("write settings: %v", err)
+	}
+	if recommendation.Calibrated {
+		fmt.Printf("\nwrote recommended settings to %s\n", path)
+	} else {
+		fmt.Printf("\nwrote provisional settings to %s\n", path)
+	}
 }
 
 func resolvePayloadBytes(raw string) (int64, error) {
@@ -142,37 +148,12 @@ func parseByteSize(raw string) (int64, error) {
 	return int64(value * float64(multiplier)), nil
 }
 
-func maybeWriteSettings(payloadBytes int64, recommendation tuner.Recommendation) {
-	if !recommendation.Calibrated {
-		return
-	}
-	if !isInteractiveTerminal() {
-		return
-	}
-
-	reader := bufio.NewReader(os.Stdin)
-	fmt.Print("\nwrite recommended settings to performance/settings.json? [y/N]: ")
-	answer, err := reader.ReadString('\n')
-	if err != nil {
-		if err == io.EOF {
-			fmt.Println("leaving performance/settings.json unchanged")
-			return
-		}
-		fmt.Fprintf(os.Stderr, "read answer: %v\n", err)
-		return
-	}
-	answer = strings.ToLower(strings.TrimSpace(answer))
-	if answer != "y" && answer != "yes" {
-		fmt.Println("leaving performance/settings.json unchanged")
-		return
-	}
-
-	path, err := performance.WriteTunedSettings(payloadBytes, recommendation.RecommendedDelay, performance.SoakConfigFor(recommendation.RecommendedMaxBatch, recommendation.RecommendedMaxBuffered))
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "write settings: %v\n", err)
-		return
-	}
-	fmt.Printf("wrote recommended settings to %s\n", path)
+func writeSettings(payloadBytes int64, recommendation tuner.Recommendation) (string, error) {
+	return performance.WriteTunedSettings(
+		payloadBytes,
+		recommendation.RecommendedDelay,
+		performance.SoakConfigFor(recommendation.RecommendedMaxBatch, recommendation.RecommendedMaxBuffered),
+	)
 }
 
 func isInteractiveTerminal() bool {

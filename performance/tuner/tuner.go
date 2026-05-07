@@ -193,8 +193,8 @@ func Tune(ctx context.Context, opts Options) (Recommendation, error) {
 	if edgeFound {
 		notes = append(notes, "Recommendation is the last healthy point before queue pressure appeared.")
 	} else {
-		notes = append(notes, "The probe did not find a pressured boundary on this machine, so no tuned settings are being recommended yet.")
-		notes = append(notes, "Try a longer probe duration or a larger payload size and run make tune again.")
+		notes = append(notes, "The probe did not reach queue pressure within the tune budget, so these settings are a provisional clean starting point.")
+		notes = append(notes, "Try a longer probe duration or a larger payload size if you want the tuner to validate the boundary more aggressively.")
 		if remainingRuns <= 0 {
 			notes = append(notes, "The tune run stopped after reaching its probe budget to keep runtime bounded.")
 		}
