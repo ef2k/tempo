@@ -20,6 +20,8 @@ const (
 	KiB int64 = 1024
 	MiB       = 1024 * KiB
 	GiB       = 1024 * MiB
+
+	maxTuneProbeRuns = 12
 )
 
 type Options struct {
@@ -83,6 +85,8 @@ type probeResult struct {
 	timedOut          bool
 }
 
+var errTuneProbeBudgetExhausted = errors.New("tune probe budget exhausted")
+
 func Tune(ctx context.Context, opts Options) (Recommendation, error) {
 	if opts.PayloadBytes <= 0 {
 		return Recommendation{}, errors.New("payload bytes must be greater than zero")
@@ -108,12 +112,16 @@ func Tune(ctx context.Context, opts Options) (Recommendation, error) {
 	var fallbackPass *ProbeRun
 	var failureRun *ProbeRun
 	var edgeFound bool
+	remainingRuns := maxTuneProbeRuns
 
 	for _, producerCount := range probeProducerCandidates(producers) {
 		for _, delay := range delayCandidates {
-			lastHealthy, firstFailure, runs, err := searchDelayProfile(ctx, opts, producerCount, delay, startBuffered, minBuffered, maxBuffered)
+			lastHealthy, firstFailure, runs, err := searchDelayProfile(ctx, opts, producerCount, delay, startBuffered, minBuffered, maxBuffered, &remainingRuns)
 			recommendation.Runs = append(recommendation.Runs, runs...)
 			if err != nil {
+				if errors.Is(err, errTuneProbeBudgetExhausted) {
+					break
+				}
 				return Recommendation{}, err
 			}
 			if lastHealthy != nil {
@@ -132,7 +140,7 @@ func Tune(ctx context.Context, opts Options) (Recommendation, error) {
 			edgeFound = true
 			break
 		}
-		if edgeFound {
+		if edgeFound || remainingRuns <= 0 {
 			break
 		}
 	}
@@ -187,6 +195,9 @@ func Tune(ctx context.Context, opts Options) (Recommendation, error) {
 	} else {
 		notes = append(notes, "The probe did not find a pressured boundary on this machine, so no tuned settings are being recommended yet.")
 		notes = append(notes, "Try a longer probe duration or a larger payload size and run make tune again.")
+		if remainingRuns <= 0 {
+			notes = append(notes, "The tune run stopped after reaching its probe budget to keep runtime bounded.")
+		}
 	}
 	if totalMem > 0 {
 		notes = append(notes, fmt.Sprintf("Recommendation stays within a conservative fraction of detected machine memory (%s total).", formatBytes(int64(totalMem))))
@@ -196,20 +207,20 @@ func Tune(ctx context.Context, opts Options) (Recommendation, error) {
 	return recommendation, nil
 }
 
-func searchDelayProfile(ctx context.Context, opts Options, producers int, delay time.Duration, startBuffered, minBuffered, maxBuffered int64) (*ProbeRun, *ProbeRun, []ProbeRun, error) {
+func searchDelayProfile(ctx context.Context, opts Options, producers int, delay time.Duration, startBuffered, minBuffered, maxBuffered int64, remainingRuns *int) (*ProbeRun, *ProbeRun, []ProbeRun, error) {
 	current := startBuffered
 	var lastHealthy *ProbeRun
 	var firstFailure *ProbeRun
 	runs := make([]ProbeRun, 0, 8)
 
-	run, err := runProbeStep(ctx, probeConfig{
+	run, err := runBudgetedProbeStep(ctx, probeConfig{
 		PayloadBytes:     opts.PayloadBytes,
 		ProbeDuration:    opts.ProbeDuration,
 		ProducerCount:    producers,
 		MaxBufferedBytes: current,
 		MaxBatchBytes:    probeBatchBytes(opts.PayloadBytes, current),
 		ConsumerDelay:    delay,
-	})
+	}, remainingRuns)
 	if err != nil {
 		return nil, nil, runs, err
 	}
@@ -226,14 +237,14 @@ func searchDelayProfile(ctx context.Context, opts Options, producers int, delay 
 			if next == current {
 				break
 			}
-			run, err := runProbeStep(ctx, probeConfig{
+			run, err := runBudgetedProbeStep(ctx, probeConfig{
 				PayloadBytes:     opts.PayloadBytes,
 				ProbeDuration:    opts.ProbeDuration,
 				ProducerCount:    producers,
 				MaxBufferedBytes: next,
 				MaxBatchBytes:    probeBatchBytes(opts.PayloadBytes, next),
 				ConsumerDelay:    delay,
-			})
+			}, remainingRuns)
 			if err != nil {
 				return nil, nil, runs, err
 			}
@@ -259,14 +270,14 @@ func searchDelayProfile(ctx context.Context, opts Options, producers int, delay 
 			if next == current {
 				break
 			}
-			run, err := runProbeStep(ctx, probeConfig{
+			run, err := runBudgetedProbeStep(ctx, probeConfig{
 				PayloadBytes:     opts.PayloadBytes,
 				ProbeDuration:    opts.ProbeDuration,
 				ProducerCount:    producers,
 				MaxBufferedBytes: next,
 				MaxBatchBytes:    probeBatchBytes(opts.PayloadBytes, next),
 				ConsumerDelay:    delay,
-			})
+			}, remainingRuns)
 			if err != nil {
 				return nil, nil, runs, err
 			}
@@ -307,14 +318,14 @@ func searchDelayProfile(ctx context.Context, opts Options, producers int, delay 
 		if mid <= high {
 			break
 		}
-		run, err := runProbeStep(ctx, probeConfig{
+		run, err := runBudgetedProbeStep(ctx, probeConfig{
 			PayloadBytes:     opts.PayloadBytes,
 			ProbeDuration:    opts.ProbeDuration,
 			ProducerCount:    producers,
 			MaxBufferedBytes: mid,
 			MaxBatchBytes:    probeBatchBytes(opts.PayloadBytes, mid),
 			ConsumerDelay:    delay,
-		})
+		}, remainingRuns)
 		if err != nil {
 			return nil, nil, runs, err
 		}
@@ -331,6 +342,16 @@ func searchDelayProfile(ctx context.Context, opts Options, producers int, delay 
 	}
 
 	return lastHealthy, firstFailure, runs, nil
+}
+
+func runBudgetedProbeStep(ctx context.Context, cfg probeConfig, remainingRuns *int) (ProbeRun, error) {
+	if remainingRuns != nil {
+		if *remainingRuns <= 0 {
+			return ProbeRun{}, errTuneProbeBudgetExhausted
+		}
+		*remainingRuns--
+	}
+	return runProbeStep(ctx, cfg)
 }
 
 func runProbeStep(ctx context.Context, cfg probeConfig) (ProbeRun, error) {

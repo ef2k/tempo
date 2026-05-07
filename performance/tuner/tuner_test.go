@@ -1,6 +1,8 @@
 package tuner
 
 import (
+	"context"
+	"errors"
 	"testing"
 	"time"
 )
@@ -87,5 +89,13 @@ func TestProbeRunHealthRequiresZeroRejections(t *testing.T) {
 				t.Fatalf("healthy = %t, want %t", got, tc.want)
 			}
 		})
+	}
+}
+
+func TestRunBudgetedProbeStepStopsAtBudget(t *testing.T) {
+	remaining := 0
+	_, err := runBudgetedProbeStep(context.Background(), probeConfig{}, &remaining)
+	if !errors.Is(err, errTuneProbeBudgetExhausted) {
+		t.Fatalf("error = %v, want %v", err, errTuneProbeBudgetExhausted)
 	}
 }
