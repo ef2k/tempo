@@ -80,9 +80,9 @@ import (
 
 // Create a dispatcher with a flush interval and byte limits
 d, _ := tempo.NewDispatcher(&tempo.Config{
-	Interval:         250 * time.Millisecond,
-	MaxBatchBytes:    32 * tempo.KiB,
-	MaxBufferedBytes: 4 * tempo.MiB,
+	Interval:         250 * time.Millisecond, // time to next batch
+	MaxBatchBytes:    32 * tempo.KiB,         // batch size target
+	MaxBufferedBytes: 4 * tempo.MiB,          // in-memory limit
 })
 
 // Start the dispatcher loop
