@@ -50,6 +50,22 @@ type tuneDefaultsSettings struct {
 	PayloadBytes int64  `json:"payload_bytes"`
 }
 
+type persistedTunedSettings struct {
+	SoakDefaults persistedSoakDefaults `json:"soak_defaults"`
+	TuneDefaults persistedTuneDefaults `json:"tune_defaults,omitempty"`
+}
+
+type persistedSoakDefaults struct {
+	Interval         string `json:"interval"`
+	MaxBatchBytes    int64  `json:"max_batch_bytes"`
+	MaxBufferedBytes int64  `json:"max_pending_bytes"`
+	ConsumerDelay    string `json:"consumer_delay,omitempty"`
+}
+
+type persistedTuneDefaults struct {
+	PayloadBytes int64 `json:"payload_bytes,omitempty"`
+}
+
 var (
 	settingsOnce sync.Once
 	settings     performanceSettings
@@ -98,20 +114,18 @@ func PerformanceSettingsPath() (string, error) {
 }
 
 func WriteTunedSettings(payloadBytes int64, delay time.Duration, cfg tempo.Config) (string, error) {
-	settings, err := loadPerformanceSettings()
-	if err != nil {
-		return "", err
-	}
 	path, err := settingsPath()
 	if err != nil {
 		return "", err
 	}
 
-	settings.SoakDefaults.MaxBatchBytes = cfg.MaxBatchBytes
-	settings.SoakDefaults.MaxBufferedBytes = cfg.MaxBufferedBytes
-	settings.SoakDefaults.Interval = cfg.Interval.String()
-	if delay > 0 {
-		settings.SoakDefaults.ConsumerDelay = delay.String()
+	settings := persistedTunedSettings{
+		SoakDefaults: persistedSoakDefaults{
+			Interval:         cfg.Interval.String(),
+			MaxBatchBytes:    cfg.MaxBatchBytes,
+			MaxBufferedBytes: cfg.MaxBufferedBytes,
+			ConsumerDelay:    delay.String(),
+		},
 	}
 	if payloadBytes > 0 {
 		settings.TuneDefaults.PayloadBytes = payloadBytes
@@ -194,8 +208,11 @@ func SoakConfigFor(maxBatchBytes, maxBufferedBytes int64) tempo.Config {
 
 func SoakDefaultConsumerDelay() time.Duration {
 	cfg, _ := loadPerformanceSettings()
-	delay, _ := time.ParseDuration(cfg.SoakDefaults.ConsumerDelay)
-	if delay <= 0 {
+	if cfg.SoakDefaults.ConsumerDelay == "" {
+		return 200 * time.Microsecond
+	}
+	delay, err := time.ParseDuration(cfg.SoakDefaults.ConsumerDelay)
+	if err != nil {
 		return 200 * time.Microsecond
 	}
 	return delay
